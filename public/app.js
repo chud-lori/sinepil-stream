@@ -11,8 +11,17 @@ const LS = {
   set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
 };
 
-const HISTORY_KEY  = 'spilstream_history';
-const WISHLIST_KEY = 'spilstream_wishlist';
+const HISTORY_KEY    = 'spilstream_history';
+const WISHLIST_KEY   = 'spilstream_wishlist';
+const SYNC_TOKEN_KEY = 'spilstream_sync_token';   // auth — opaque 64-hex string
+const SYNC_CODE_KEY  = 'spilstream_sync_code';    // display only — may expire
+const SYNC_EXP_KEY   = 'spilstream_sync_code_expires_at';
+
+// Hook called after any History/Wishlist mutation. Wired up by Sync below;
+// guarded with try/catch so calls before Sync init don't throw (TDZ).
+function notifyStateChange() {
+  try { if (Sync && Sync.token) Sync.pushDebounced(); } catch {}
+}
 
 /* ---- History (localStorage) ---- */
 const History = {
@@ -23,9 +32,13 @@ const History = {
     list.unshift({ ...movie, watched_at: new Date().toISOString() });
     if (list.length > 200) list = list.slice(0, 200); // keep latest 200
     LS.set(HISTORY_KEY, list);
+    notifyStateChange();
   },
-  remove: (slug) => LS.set(HISTORY_KEY, LS.get(HISTORY_KEY).filter(m => m.slug !== slug)),
-  clear:  () => LS.set(HISTORY_KEY, []),
+  remove: (slug) => {
+    LS.set(HISTORY_KEY, LS.get(HISTORY_KEY).filter(m => m.slug !== slug));
+    notifyStateChange();
+  },
+  clear:  () => { LS.set(HISTORY_KEY, []); notifyStateChange(); },
 };
 
 /* ---- Wishlist (localStorage) ---- */
@@ -37,13 +50,188 @@ const Wishlist = {
     const list = LS.get(WISHLIST_KEY);
     list.unshift({ ...movie, added_at: new Date().toISOString() });
     LS.set(WISHLIST_KEY, list);
+    notifyStateChange();
   },
-  remove: (slug) => LS.set(WISHLIST_KEY, LS.get(WISHLIST_KEY).filter(m => m.slug !== slug)),
+  remove: (slug) => {
+    LS.set(WISHLIST_KEY, LS.get(WISHLIST_KEY).filter(m => m.slug !== slug));
+    notifyStateChange();
+  },
   toggle: (movie) => {
     if (Wishlist.has(movie.slug)) { Wishlist.remove(movie.slug); return false; }
     Wishlist.add(movie); return true;
   },
 };
+
+/* ---- Cross-device sync ----
+   Auth model:
+     - token  → 64-hex device credential. Long-lived. Used for every push/pull.
+     - code   → 6-char pairing PIN. Short-lived (24h). Only used to bring a new
+                device onto an existing slot. Expires independently of token.
+     - expiry → ISO timestamp; used purely for UI display.
+   Anyone with a valid (unexpired) code can pair. Any device with a token has
+   full access until disconnected. Server merges per-slug LWW on push.
+*/
+const Sync = {
+  get token()      { return localStorage.getItem(SYNC_TOKEN_KEY) || ''; },
+  set token(t)     { t ? localStorage.setItem(SYNC_TOKEN_KEY, t) : localStorage.removeItem(SYNC_TOKEN_KEY); },
+  get code()       { return localStorage.getItem(SYNC_CODE_KEY) || ''; },
+  set code(c)      { c ? localStorage.setItem(SYNC_CODE_KEY, c) : localStorage.removeItem(SYNC_CODE_KEY); },
+  get codeExpires(){ return localStorage.getItem(SYNC_EXP_KEY) || ''; },
+  set codeExpires(e){ e ? localStorage.setItem(SYNC_EXP_KEY, e) : localStorage.removeItem(SYNC_EXP_KEY); },
+
+  isCodeActive() {
+    return Sync.code && Sync.codeExpires && Sync.codeExpires > new Date().toISOString();
+  },
+
+  _saveCreds({ token, code, code_expires_at }) {
+    if (token)            Sync.token       = token;
+    if (code)             Sync.code        = code;
+    if (code_expires_at)  Sync.codeExpires = code_expires_at;
+  },
+
+  _clearCreds() {
+    Sync.token       = '';
+    Sync.code        = '';
+    Sync.codeExpires = '';
+  },
+
+  async _post(path, body) {
+    const r = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      const e = new Error(data.error || `Request failed (${r.status})`);
+      e.status = r.status;
+      throw e;
+    }
+    return r.status === 204 ? null : r.json();
+  },
+
+  async createNew() {
+    const data = await Sync._post('/api/sync/create');
+    Sync._saveCreds(data);
+    await Sync.push();          // seed the new slot with this device's state
+    return data;
+  },
+
+  async pair(rawCode) {
+    const code = String(rawCode || '').toUpperCase().trim();
+    const data = await Sync._post('/api/sync/pair', { code });
+    Sync.token = data.token;
+    // We have the code in hand already; store it for display. Expiry unknown
+    // post-pair (server doesn't surface it here) — user can regenerate if needed.
+    Sync.code = code;
+    Sync.codeExpires = '';
+    // Merge — must NOT replace, or we'd nuke this device's pre-pair history.
+    Sync._mergeIntoLocal(data.payload || {});
+    Sync._refreshUI();
+    // Push the union. Server merges idempotently and returns canonical state.
+    await Sync.push();
+  },
+
+  // Server returns a fully-merged blob; replace local with it.
+  _applyServerPayload(payload) {
+    const h = Array.isArray(payload.history)  ? payload.history  : [];
+    const w = Array.isArray(payload.wishlist) ? payload.wishlist : [];
+    LS.set(HISTORY_KEY,  h);
+    LS.set(WISHLIST_KEY, w);
+  },
+
+  async push() {
+    if (!Sync.token) return;
+    try {
+      const data = await Sync._post('/api/sync/push', {
+        token:   Sync.token,
+        payload: { v: 1, history: History.all(), wishlist: Wishlist.all() },
+      });
+      // Authoritative merged result from the server — adopt it. May contain entries
+      // a sibling device pushed while we were offline.
+      const before = JSON.stringify({ h: History.all(), w: Wishlist.all() });
+      Sync._applyServerPayload(data.payload || {});
+      const after  = JSON.stringify({ h: History.all(), w: Wishlist.all() });
+      if (before !== after) Sync._refreshUI();
+    } catch (e) {
+      // Token revoked from another device — clear locally so the user can re-pair.
+      if (e.status === 401) Sync._clearCreds();
+    }
+  },
+
+  pushDebounced() {
+    clearTimeout(Sync._t);
+    Sync._t = setTimeout(() => Sync.push(), 1500);
+  },
+
+  async syncOnLoad() {
+    if (!Sync.token) return;
+    try {
+      const data = await Sync._pull();
+      // Merge remote into local, push the union, server returns the canonical merged blob.
+      Sync._mergeIntoLocal(data.payload || {});
+      Sync._refreshUI();
+      Sync.push();
+    } catch (e) {
+      if (e.status === 401) Sync._clearCreds();
+    }
+  },
+
+  _mergeIntoLocal(remote) {
+    const remoteH = Array.isArray(remote.history)  ? remote.history  : [];
+    const remoteW = Array.isArray(remote.wishlist) ? remote.wishlist : [];
+    LS.set(HISTORY_KEY,  mergeByTimestamp(LS.get(HISTORY_KEY),  remoteH, 'watched_at'));
+    LS.set(WISHLIST_KEY, mergeByTimestamp(LS.get(WISHLIST_KEY), remoteW, 'added_at'));
+  },
+
+  _refreshUI() {
+    renderContinueWatching('movie');
+    renderContinueWatching('series');
+    if (document.getElementById('sec-history')?.classList.contains('active')) renderHistory();
+    if (document.getElementById('sec-wishlist')?.classList.contains('active')) renderWishlist();
+  },
+
+  // /pull is a GET (token in query, not body), so it doesn't fit _post.
+  async _pull() {
+    const r = await fetch('/api/sync/pull?token=' + encodeURIComponent(Sync.token));
+    if (!r.ok) {
+      const e = new Error('Pull failed'); e.status = r.status; throw e;
+    }
+    return r.json();
+  },
+
+  async regenerateCode() {
+    const data = await Sync._post('/api/sync/regenerate', { token: Sync.token });
+    Sync.code        = data.code;
+    Sync.codeExpires = data.code_expires_at;
+    return data;
+  },
+
+  async disconnect() {
+    const t = Sync.token;
+    Sync._clearCreds();
+    if (t) {
+      try { await Sync._post('/api/sync/disconnect', { token: t }); } catch {}
+    }
+  },
+};
+
+// Merge two slug-keyed lists, keeping the newer record per slug.
+// ISO-8601 timestamps compare correctly with string comparison.
+function mergeByTimestamp(local, remote, tsKey) {
+  const map = new Map();
+  for (const item of local)  if (item?.slug) map.set(item.slug, item);
+  for (const item of remote) {
+    if (!item?.slug) continue;
+    const existing = map.get(item.slug);
+    if (!existing || (item[tsKey] || '') > (existing[tsKey] || '')) {
+      map.set(item.slug, item);
+    }
+  }
+  return [...map.values()].sort((a, b) =>
+    String(b[tsKey] || '').localeCompare(String(a[tsKey] || ''))
+  );
+}
 
 /* ---- State ---- */
 let currentMovie   = null;      // Movie OR series record currently open in modal
@@ -1187,6 +1375,112 @@ window.addEventListener('popstate', (e) => {
    Card-internal actions (wishlist/remove) are still handled inside
    attachCardEvents because they need to stopPropagation before the card's
    own click handler fires. */
+/* ---- Sync overlay UI ---- */
+function openSyncOverlay() {
+  document.getElementById('sync-overlay').classList.add('open');
+  renderSyncBody();
+}
+
+function closeSyncOverlay() {
+  document.getElementById('sync-overlay').classList.remove('open');
+}
+
+function renderSyncBody() {
+  const body = document.getElementById('sync-body');
+  if (!body) return;
+  if (Sync.token) {
+    // Already paired on this device
+    const codeActive = Sync.isCodeActive();
+    const codeBlock = codeActive
+      ? `<div class="sync-desc" style="margin:0">Pair another device with:</div>
+         <div class="sync-code-display">${esc(Sync.code)}</div>
+         <div class="sync-desc" style="font-size:11px;margin:0">Expires ${esc(formatExpiry(Sync.codeExpires))}. Then mint a new one to pair more devices.</div>`
+      : `<div class="sync-desc" style="margin:0">No active pairing code.</div>
+         <button class="btn btn-primary" data-action="regenerateSyncCode">Generate code to pair another device</button>`;
+    body.innerHTML = `
+      <div class="sync-status">Synced on this device</div>
+      ${codeBlock}
+      <div class="sync-actions" style="margin-top:14px">
+        <button class="btn btn-outline" data-action="disconnectSync">Disconnect this device</button>
+      </div>
+    `;
+  } else {
+    body.innerHTML = `
+      <div class="sync-actions">
+        <button class="btn btn-primary" data-action="generateSyncCode">Generate new code</button>
+        <div class="sync-or">— or pair with existing —</div>
+        <input id="sync-code-input" class="sync-input" placeholder="ABCDEF" maxlength="6"
+               inputmode="text" autocapitalize="characters" autocomplete="off"
+               aria-label="6-character sync code" />
+        <button class="btn btn-outline" data-action="enterSyncCode">Pair</button>
+      </div>
+    `;
+    setTimeout(() => document.getElementById('sync-code-input')?.focus(), 50);
+  }
+}
+
+// "Expires <relative time>" helper for the pairing code display.
+function formatExpiry(iso) {
+  if (!iso) return 'soon';
+  const ms = new Date(iso) - Date.now();
+  if (ms <= 0) return 'now';
+  const hrs = Math.floor(ms / 3600000);
+  const min = Math.floor((ms % 3600000) / 60000);
+  if (hrs > 0)  return `in ${hrs}h ${min}m`;
+  return `in ${min}m`;
+}
+
+async function generateSyncCode() {
+  try {
+    const { code } = await Sync.createNew();
+    const body = document.getElementById('sync-body');
+    body.innerHTML = `
+      <div class="sync-desc" style="margin:0">Enter this code on your other device within 24 hours:</div>
+      <div class="sync-code-display">${esc(code)}</div>
+      <div class="sync-row">
+        <button class="btn btn-outline" data-action="closeSync">Done</button>
+      </div>
+      <p class="sync-desc" style="margin:0;font-size:11px">Anyone with this code can pair to your slot — don't share it publicly.</p>
+    `;
+  } catch (e) {
+    toast('Could not generate code: ' + e.message);
+  }
+}
+
+async function regenerateSyncCode() {
+  try {
+    const { code } = await Sync.regenerateCode();
+    toast('New code: ' + code);
+    renderSyncBody();
+  } catch (e) {
+    toast('Could not regenerate: ' + e.message);
+  }
+}
+
+async function enterSyncCode() {
+  const input = document.getElementById('sync-code-input');
+  const code  = (input?.value || '').toUpperCase().trim();
+  if (!/^[A-Z0-9]{6}$/.test(code)) { toast('Enter a 6-character code'); return; }
+  try {
+    await Sync.pair(code);
+    // Refresh anything that may now show merged data
+    renderContinueWatching('movie');
+    renderContinueWatching('series');
+    if (document.getElementById('sec-history')?.classList.contains('active')) renderHistory();
+    if (document.getElementById('sec-wishlist')?.classList.contains('active')) renderWishlist();
+    toast('Paired — history & wishlist synced');
+    renderSyncBody();
+  } catch (e) {
+    toast(e.message || 'Pairing failed');
+  }
+}
+
+async function disconnectSync() {
+  await Sync.disconnect();
+  renderSyncBody();
+  toast('Disconnected from sync');
+}
+
 const CLICK_ACTIONS = {
   showTab:            (el) => showTab(el.dataset.arg),
   doSearch:           () => doSearch(),
@@ -1213,6 +1507,16 @@ const CLICK_ACTIONS = {
     const target = document.getElementById(el.dataset.target);
     if (target) target.style.display = 'none';
   },
+  openSync:           () => openSyncOverlay(),
+  closeSync:          () => closeSyncOverlay(),
+  closeSyncOverlay:   (el, e) => {
+    // Mirror modal-overlay behavior: clicking the backdrop closes, clicks inside don't.
+    if (e.target.id === 'sync-overlay' || el.classList.contains('modal-close')) closeSyncOverlay();
+  },
+  generateSyncCode:   () => generateSyncCode(),
+  enterSyncCode:      () => enterSyncCode(),
+  regenerateSyncCode: () => regenerateSyncCode(),
+  disconnectSync:     () => disconnectSync(),
 };
 
 document.addEventListener('click', (e) => {
@@ -1241,6 +1545,13 @@ document.getElementById('search-input')?.addEventListener('input', liveSearch);
 document.getElementById('url-input')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') watchByUrl();
 });
+// Enter on the dynamically-rendered sync code input submits the pairing form
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target?.id === 'sync-code-input') enterSyncCode();
+  if (e.key === 'Escape' && document.getElementById('sync-overlay').classList.contains('open')) {
+    closeSyncOverlay();
+  }
+});
 
 /* ---- Init ---- */
 (function init() {
@@ -1248,6 +1559,9 @@ document.getElementById('url-input')?.addEventListener('keydown', (e) => {
   renderContinueWatching('movie');  // Recently Watched on first paint (movies tab)
   loadHomeRails('home-rails', 'movie');
   updateTabChrome('browse');
+
+  // Pull remote state if this device is paired — fire-and-forget.
+  Sync.syncOnLoad();
 
   const m = location.pathname.match(/^\/movie\/([^/]+)$/);
   const s = location.pathname.match(/^\/series\/([^/]+)$/);

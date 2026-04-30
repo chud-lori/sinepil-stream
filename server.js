@@ -6,6 +6,7 @@ const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
 const scraper   = require('./scraper');
 const { assertSafeOutboundUrl } = require('./lib/security');
+const sync      = require('./lib/sync');
 
 const app = express();
 
@@ -201,6 +202,56 @@ app.get('/api/browse/series', async (req, res) => {
     if (!isSafeBrowsePath(p)) return res.status(400).json({ error: 'Invalid path' });
     res.json(await scraper.browseSeries(p));
   } catch (e) { sendErr(res, e); }
+});
+
+/* ======================================================
+   Cross-device sync
+   - POST /api/sync/create      → { code, token, code_expires_at }
+   - POST /api/sync/pair        → { token, payload, updated_at }
+   - GET  /api/sync/pull        → { payload, updated_at }       (auth: token)
+   - POST /api/sync/push        → { payload, updated_at }       (auth: token,
+                                    server-merged result returned)
+   - POST /api/sync/regenerate  → { code, code_expires_at }     (auth: token)
+   - POST /api/sync/disconnect  → 204                           (auth: token)
+   ====================================================== */
+
+app.post('/api/sync/create', (req, res) => {
+  try { res.json(sync.createSlot()); }
+  catch (e) { sendErr(res, e); }
+});
+
+app.post('/api/sync/pair', (req, res) => {
+  try {
+    const code = String(req.body?.code || '').toUpperCase();
+    res.json(sync.pairWithCode(code));
+  } catch (e) { sendErr(res, e); }
+});
+
+app.get('/api/sync/pull', (req, res) => {
+  try {
+    const token = String(req.query.token || '');
+    res.json(sync.pullByToken(token));
+  } catch (e) { sendErr(res, e); }
+});
+
+app.post('/api/sync/push', (req, res) => {
+  try {
+    const token = String(req.body?.token || '');
+    if (req.body?.payload === undefined) return res.status(400).json({ error: 'Missing payload' });
+    res.json(sync.pushByToken(token, req.body.payload));
+  } catch (e) { sendErr(res, e); }
+});
+
+app.post('/api/sync/regenerate', (req, res) => {
+  try {
+    const token = String(req.body?.token || '');
+    res.json(sync.regenerateCode(token));
+  } catch (e) { sendErr(res, e); }
+});
+
+app.post('/api/sync/disconnect', (req, res) => {
+  sync.disconnect(String(req.body?.token || ''));
+  res.status(204).end();
 });
 
 // Home view — returns an array of rails [{ id, title, path, items }].

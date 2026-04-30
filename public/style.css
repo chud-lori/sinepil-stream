@@ -1027,3 +1027,73 @@ nav {
   .modal-meta { gap: 6px; }
   .modal-footer { padding: 10px 14px 20px; }
 }
+
+/* ----- Sync overlay (small dialog, separate from movie/series modal) ----- */
+.sync-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.85);
+  z-index: 250;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.sync-overlay.open { display: flex; }
+.sync-dialog {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 28px;
+  width: 100%;
+  max-width: 440px;
+  position: relative;
+  text-align: center;
+}
+.sync-title { margin: 0 0 8px; font-size: 18px; }
+.sync-desc  { margin: 0 0 18px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.sync-body  { display: flex; flex-direction: column; gap: 14px; }
+.sync-code-display {
+  font-family: 'Courier New', monospace;
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: 8px;
+  background: rgba(255,255,255,0.06);
+  padding: 18px 12px;
+  border-radius: 8px;
+  user-select: all;
+}
+.sync-status {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 10px 0;
+}
+.sync-status strong {
+  font-family: 'Courier New', monospace;
+  letter-spacing: 4px;
+  color: var(--text);
+  font-size: 16px;
+}
+.sync-input {
+  width: 100%;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid #333;
+  color: var(--text);
+  font-family: 'Courier New', monospace;
+  font-size: 22px;
+  letter-spacing: 6px;
+  text-align: center;
+  text-transform: uppercase;
+  padding: 12px;
+  border-radius: 8px;
+  outline: none;
+}
+.sync-input:focus { border-color: var(--accent); }
+.sync-or {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.sync-actions { display: flex; flex-direction: column; gap: 10px; }
+.sync-row { display: flex; gap: 8px; }
+.sync-row .btn { flex: 1; }

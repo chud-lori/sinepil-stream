@@ -207,7 +207,10 @@
 <div id="sec-history" class="section">
   <div class="section-header">
     <span class="section-title">Watch History</span>
-    <button class="btn btn-outline" style="font-size:12px;padding:5px 12px;" data-action="clearHistory">Clear All</button>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-outline" style="font-size:12px;padding:5px 12px;" data-action="openSync">Sync</button>
+      <button class="btn btn-outline" style="font-size:12px;padding:5px 12px;" data-action="clearHistory">Clear All</button>
+    </div>
   </div>
   <div id="history-grid" class="grid grid-lg"></div>
 </div>
@@ -309,6 +312,16 @@
         Share
       </button>
     </div>
+  </div>
+</div>
+
+<!-- SYNC OVERLAY -->
+<div class="sync-overlay" id="sync-overlay" data-action="closeSyncOverlay">
+  <div class="sync-dialog" id="sync-dialog">
+    <button class="modal-close" data-action="closeSyncOverlay" aria-label="Close">&#x2715;</button>
+    <h3 class="sync-title">Sync across devices</h3>
+    <p class="sync-desc">Share your watch history &amp; wishlist between devices using a 6-character code.</p>
+    <div id="sync-body"></div>
   </div>
 </div>
 
