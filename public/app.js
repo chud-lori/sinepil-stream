@@ -877,9 +877,9 @@ async function openSeries(slug, { pushHistory = true, autoEpisode } = {}) {
     //   1. Deep-link autoEpisode wins.
     //   2. Else, if there's history → jump to the *next* episode after last-played
     //      ("Continue from where you left"). If already at the latest, replay it.
-    //   3. Else, no autoplay — let the user pick.
+    //   3. Else, autoplay S1E1 (TV/remote users can't easily scroll to a picker).
     let startSeason  = autoEpisode?.season  || data.seasons[0]?.season;
-    let startEpisode = autoEpisode?.episode || null;
+    let startEpisode = autoEpisode?.episode || data.seasons[0]?.episodes?.[0]?.episode || null;
     let continuing   = false;
     if (!autoEpisode && existing?.lastSeason && existing?.lastEpisode) {
       const next = nextEpisodeAfter(data.seasons, existing.lastSeason, existing.lastEpisode);

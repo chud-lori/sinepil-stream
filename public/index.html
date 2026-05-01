@@ -238,6 +238,21 @@
   <div class="modal" id="modal">
     <button class="modal-close" data-action="closeModal">&#x2715;</button>
 
+    <!-- Episode picker (series only; hidden for movies).
+         Placed above the player so episodes stay reachable on TV/remote setups
+         where the cross-origin iframe captures pointer events and blocks scroll. -->
+    <div class="episode-picker" id="episode-picker" style="display:none">
+      <div class="episode-picker-row">
+        <label for="season-select" class="season-label">Season</label>
+        <select id="season-select" class="season-select"></select>
+        <span class="episode-status" id="episode-status"></span>
+        <button id="next-episode-btn" class="btn-next-ep" onclick="loadNextEpisode()" style="display:none">
+          Next &rarr;
+        </button>
+      </div>
+      <div class="episode-list" id="episode-list"></div>
+    </div>
+
     <!-- Player -->
     <div class="player-wrap" id="player-wrap">
       <div class="player-placeholder" id="player-placeholder">
@@ -254,19 +269,6 @@
           <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
         </svg>
       </button>
-    </div>
-
-    <!-- Episode picker (series only; hidden for movies) -->
-    <div class="episode-picker" id="episode-picker" style="display:none">
-      <div class="episode-picker-row">
-        <label for="season-select" class="season-label">Season</label>
-        <select id="season-select" class="season-select"></select>
-        <span class="episode-status" id="episode-status"></span>
-        <button id="next-episode-btn" class="btn-next-ep" onclick="loadNextEpisode()" style="display:none">
-          Next &rarr;
-        </button>
-      </div>
-      <div class="episode-list" id="episode-list"></div>
     </div>
 
     <!-- Player selection tabs -->
