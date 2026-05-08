@@ -180,6 +180,23 @@ const Sync = {
     }
   },
 
+  // Lightweight pull when the tab becomes visible — picks up sibling-device
+  // changes without requiring a full reload. No push back: nothing changed
+  // locally, so there's nothing for the server to learn from us.
+  async pullIfVisible() {
+    if (!Sync.token) return;
+    const now = Date.now();
+    if (now - (Sync._lastPull || 0) < 2000) return;  // debounce rapid focus toggles
+    Sync._lastPull = now;
+    try {
+      const data = await Sync._pull();
+      Sync._mergeIntoLocal(data.payload || {});
+      Sync._refreshUI();
+    } catch (e) {
+      if (e.status === 401) Sync._clearCreds();
+    }
+  },
+
   _mergeIntoLocal(remote) {
     const remoteH = Array.isArray(remote.history)  ? remote.history  : [];
     const remoteW = Array.isArray(remote.wishlist) ? remote.wishlist : [];
@@ -1579,6 +1596,12 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && document.getElementById('sync-overlay').classList.contains('open')) {
     closeSyncOverlay();
   }
+});
+
+// Pull on tab focus so a device sitting idle picks up changes another device
+// pushed (e.g. you watched something on phone, then return to the TV tab).
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') Sync.pullIfVisible();
 });
 
 /* ---- Init ---- */
