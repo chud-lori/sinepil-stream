@@ -573,6 +573,10 @@ nav {
 
 .modal-overlay.open { display: flex; align-items: flex-start; justify-content: center; }
 
+/* Lock body scroll while a modal is open so the page behind doesn't also
+   show its scrollbar (two side-by-side scrollbars). */
+body.modal-open { overflow: hidden; }
+
 .modal {
   background: var(--surface);
   border-radius: 12px;

@@ -835,6 +835,7 @@ function resetModalChrome() {
   descExpanded   = false;
 
   document.getElementById('modal-overlay').classList.add('open');
+  document.body.classList.add('modal-open');
   resetPlayer('Loading…');
   document.getElementById('player-tabs').innerHTML = '';
   const picker = document.getElementById('episode-picker');
@@ -1245,6 +1246,7 @@ function toggleWishlist() {
 function closeModal(e) {
   if (e && e.target !== document.getElementById('modal-overlay')) return;
   document.getElementById('modal-overlay').classList.remove('open');
+  document.body.classList.remove('modal-open');
   document.querySelector('.modal-close')?.classList.remove('auto-hide', 'visible');
   resetPlayer();
   currentMovie   = null;
@@ -1396,6 +1398,7 @@ window.addEventListener('popstate', (e) => {
   } else {
     if (document.getElementById('modal-overlay').classList.contains('open')) {
       document.getElementById('modal-overlay').classList.remove('open');
+      document.body.classList.remove('modal-open');
       resetPlayer();
       currentMovie   = null;
       currentSeries  = null;
