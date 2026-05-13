@@ -21,7 +21,8 @@ SinepilStream server (Node.js / Express)
     │
     ├─ lib/cache.js   : SQLite response cache (SWR + in-flight coalescing)
     ├─ lib/sources/*  : upstream HTML / JSON-LD scraping
-    └─ lib/resolver.js: playeriframe.sbs → inner player URL
+    ├─ lib/resolver.js: encrypted token / playeriframe.sbs wrapper → inner player URL
+    └─ lib/decrypt.js : jsdom sandbox that runs upstream's player.js to decrypt tokens
 
 Browser renders rails of cards. Clicking a card →
     GET /api/movie/:slug  or  /api/series/:slug
@@ -128,23 +129,51 @@ Plus JSON-LD `TVSeries` for description / director / cast / genre.
 
 ## 4. Player resolution
 
-Both sources expose video sources as `playeriframe.sbs` wrapper URLs:
+Upstream now ships `data-url` in two formats. `lib/resolver.js::resolvePlayers(rawPlayers, { referer, origin, pageUrl })` splits the list by format and routes each through its own path.
 
-```html
-<a data-url="https://playeriframe.sbs/iframe/cast/abc123"    data-server="CAST">CAST</a>
-<a data-url="https://playeriframe.sbs/iframe/hydrax/def456"  data-server="HYDRAX">HYDRAX</a>
-<a data-url="https://playeriframe.sbs/iframe/turbovip/ghi"   data-server="TURBOVIP">TURBOVIP</a>
-<a data-url="https://playeriframe.sbs/iframe/p2p/jkl"        data-server="P2P">P2P</a>
-```
+| Format                | Example                                       | Path                                                |
+|-----------------------|-----------------------------------------------|-----------------------------------------------------|
+| Legacy plain URL      | `https://playeriframe.sbs/iframe/cast/abc123` | HTTP fetch + inner-iframe extract (`resolveInnerUrl`) |
+| Encrypted token (Nov 2026+) | `YuvLljMYIlUgNITzceX+NKlGMbWCwksz…` (base64 AES-CBC ciphertext) | Headless Chromium runs upstream's own JS to decrypt   |
 
-`lib/resolver.js::resolvePlayers(rawPlayers, { referer, origin })`:
+### Encrypted-token flow (jsdom)
 
-1. For each wrapper URL, fetch it server-side with source-site Referer/Origin headers.
+Upstream replaced their `playeriframe.sbs` URLs with AES-CBC ciphertext, decrypted client-side by a heavily obfuscated `obfuscator.io`-VM-style `player.js` (their script ships its own bytecode interpreter; constant strings live as base64-marshalled blobs in the bytecode stream). Static deobfuscation isn't worth it — they regenerate the VM on each release.
+
+But the obfuscator exposes the decrypt routine as a *public symbol* on a `vmX_<hex>` global (because their own click handlers need to call it). So we load their `player.js` in a tiny jsdom sandbox, find that function by behavior, and call it directly. `lib/decrypt.js`:
+
+1. Fetches `player.js` + `script.js` from upstream once, caches the source in SQLite for 6 h (TTL — picks up upstream rotations).
+2. Builds a single jsdom instance, evaluates the two scripts.
+3. Scans every function on every `vmX_*` global, calls each with the first token we need to decrypt; the one that returns a string starting with `https://` is the decrypt fn. Cached for the rest of the process lifetime (refreshed every 6 h, or on explicit invalidate).
+4. Decryption is then a synchronous function call: `decrypt(token) → "https://playeriframe.sbs/iframe/<player>/<id>"`.
+5. The wrapper URL is fed through the legacy `resolveInnerUrl` path below to get the deep embed URL.
+
+Caching keeps the decrypt sandbox off the hot path even more:
+
+- Per-token cache in `response_cache` (key `player:<encrypted-token>`, TTL 12 h). A movie's tokens are looked up first in cache; the decrypt sandbox only runs on a miss.
+- The detail-page response is independently cached for 30 min by `lib/cache.js`.
+
+**Performance:** cold init (fetch upstream scripts + build jsdom + discover fn) ~280 ms. Per-token decrypt ~0.25 ms. Cold scrape end-to-end ~1.2 s, dominated by the source-site HTML fetch — not by decryption. Warm cache: 0 ms.
+
+If upstream rotates the AES key, cached URLs may stop working — iframe just fails to load, the frontend's "try next player" fallback kicks in, and the bad entry ages out of cache in ≤12 h. The decrypt sandbox itself self-refreshes on the next 6 h tick (or sooner if resolution starts failing — `invalidateInit()` forces a re-fetch). No code change required.
+
+If they ever stop exposing the decrypt fn publicly (unlikely — their own page needs it), `discoverDecryptFn` returns null and the resolver falls back to the proxy path.
+
+### Legacy plain-URL flow
+
+For any plain `playeriframe.sbs` URL still seen in the markup (`resolveInnerUrl`):
+
+1. Fetch the wrapper server-side with source-site Referer/Origin headers.
 2. Extract the inner `<iframe src>` from the wrapper page (skipping 1×1 Cloudflare challenge iframes).
-3. If resolution fails, set `finalUrl` to `/api/proxy?url=<wrapper>` as a fallback — our proxy re-injects the spoof script and strips CSP headers so the iframe renders inside our domain.
+
+### Common post-resolution
+
+For both flows:
+
+3. If resolution fails, set `finalUrl` to `/api/proxy?url=<original-src>` as a fallback — our proxy re-injects the spoof script and strips CSP headers so the iframe renders inside our domain.
 4. Drop P2P (`cloud.hownetwork.xyz`) entirely — it's behind Cloudflare JS challenges and hostname checks that can never be satisfied server-side.
 
-All wrapper URLs are resolved **in parallel** during the detail-page scrape, so clicking a player tab in the UI is instant — there's no round-trip.
+The frontend gets pre-resolved `finalUrl` values, so clicking a player tab is instant — no round-trip.
 
 ---
 
@@ -172,6 +201,10 @@ Object.defineProperty(document, 'referrer', {
   configurable: true,
 });
 ```
+
+### Encrypted player tokens
+
+Upstream's `obfuscator.io`-VM `player.js` decrypts AES-encrypted player URLs client-side. We don't reverse the obfuscation — we run it (in jsdom, not a real browser). See Section 4 for the flow.
 
 ### Source host rotation
 

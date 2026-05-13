@@ -8,11 +8,10 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3500
-    # Cap container memory. Node ~100MB + idle Chromium ~150MB + active page ~200MB
-    # leaves headroom inside 800M. Headless auto-closes after 5min idle (see
-    # lib/headless.js). If we breach, Docker OOMs the container and `restart`
-    # brings it back — better than swap-thrashing the host.
-    mem_limit: 800m
+    # Cap container memory. Node ~80MB + jsdom decrypt sandbox ~50MB. 400M
+    # leaves plenty of headroom for SQLite + concurrent scrapes. If we breach,
+    # Docker OOMs the container and `restart` brings it back.
+    mem_limit: 400m
     volumes:
       - sinepilstream_data:/app/data   # named volume — lives in /var/lib/docker/volumes/, NOT in the project dir
       - ./logs:/app/logs

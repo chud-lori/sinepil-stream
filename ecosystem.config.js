@@ -19,10 +19,8 @@ module.exports = {
       },
 
       // Auto-restart on crash; cap memory for <2 GB servers.
-      // Bumped to 700M to leave headroom for the headless Chromium instance
-      // that resolves encrypted player tokens (see lib/headless.js).
       autorestart:        true,
-      max_memory_restart: '700M',
+      max_memory_restart: '300M',
       restart_delay:      1000,
       max_restarts:       10,
 
