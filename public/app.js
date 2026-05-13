@@ -572,11 +572,32 @@ async function loadHomeRails(containerId, kind) {
 }
 
 // Scroll handler for the arrow buttons (wired via data-action="railScroll").
+function syncRailArrows(wrap) {
+  const strip = wrap.querySelector('.rail-scroll');
+  const left  = wrap.querySelector('.rail-arrow-left');
+  const right = wrap.querySelector('.rail-arrow-right');
+  if (!strip || !left || !right) return;
+  const maxScroll = strip.scrollWidth - strip.clientWidth;
+  const atStart = strip.scrollLeft <= 2;
+  const atEnd   = strip.scrollLeft >= maxScroll - 2;
+  left.classList.toggle('rail-arrow-hidden', atStart);
+  right.classList.toggle('rail-arrow-hidden', atEnd);
+  // Defence-in-depth: even if a stale CSS cache leaves the button visible,
+  // the `disabled` attribute makes the click a no-op (no bounce).
+  left.disabled  = atStart;
+  right.disabled = atEnd;
+}
+
 function railScroll(btn) {
   const dir   = parseInt(btn.dataset.dir, 10) || 1;
   const wrap  = btn.closest('.rail-wrap');
   const strip = wrap?.querySelector('.rail-scroll');
   if (!strip) return;
+  // Belt-and-suspenders: bail out if we're already at the boundary, so a
+  // misaligned arrow visibility can't produce the "slides then bounces back" UX.
+  const maxScroll = strip.scrollWidth - strip.clientWidth;
+  if (dir < 0 && strip.scrollLeft <= 2)             return;
+  if (dir > 0 && strip.scrollLeft >= maxScroll - 2) return;
   // Scroll by ~85% of the visible width so the user sees a fresh batch
   // without losing context.
   const delta = strip.clientWidth * 0.85 * dir;
@@ -586,17 +607,13 @@ function railScroll(btn) {
 // Show/hide each arrow depending on whether there's more to scroll that way.
 function updateRailArrows(wrap) {
   const strip = wrap.querySelector('.rail-scroll');
-  const left  = wrap.querySelector('.rail-arrow-left');
-  const right = wrap.querySelector('.rail-arrow-right');
-  if (!strip || !left || !right) return;
-  const sync = () => {
-    const maxScroll = strip.scrollWidth - strip.clientWidth;
-    left.classList.toggle('rail-arrow-hidden',  strip.scrollLeft <= 2);
-    right.classList.toggle('rail-arrow-hidden', strip.scrollLeft >= maxScroll - 2);
-  };
+  if (!strip) return;
+  const sync = () => syncRailArrows(wrap);
   sync();
+  // Belt-and-suspenders: scrollWidth can be stale before the first paint;
+  // re-sync on the next animation frame + after lazy images settle.
+  requestAnimationFrame(sync);
   strip.addEventListener('scroll', sync, { passive: true });
-  // Re-check after images load, since card heights/widths can shift briefly.
   setTimeout(sync, 400);
   window.addEventListener('resize', sync);
 }

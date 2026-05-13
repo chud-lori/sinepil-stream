@@ -431,7 +431,14 @@ nav {
 .rail-arrow-right { right: 4px; }
 .rail-wrap:hover .rail-arrow { opacity: 1; }
 .rail-arrow:hover { background: var(--accent); border-color: var(--accent); opacity: 1; }
-.rail-arrow-hidden { display: none; }
+/* Belt-and-suspenders: any browser CSS-cache weirdness still can't make these
+   arrows tappable when there's nothing to scroll. The JS also sets `disabled`. */
+.rail-arrow-hidden {
+  display: none !important;
+  pointer-events: none !important;
+  visibility: hidden !important;
+}
+.rail-arrow:disabled { display: none; }
 @media (hover: none) and (pointer: coarse) {
   /* True touch devices — natural swipe is better than an arrow-tap target.
      Excludes TVs/laptops with hover:none but pointer:fine. */
