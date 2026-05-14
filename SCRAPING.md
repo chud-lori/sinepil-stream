@@ -203,10 +203,11 @@ for (var c = document.querySelectorAll("#player-list a"), f = 0; f < c.length; f
   });
 ```
 
-`_L` is referenced as a **bare global identifier**. The obfuscator has to expose its decrypt function publicly so the page's own non-obfuscated handlers can call it. Sure enough, after loading `player.js` in any JS runtime:
+`_L` is referenced as a **bare global identifier**. The obfuscator has to expose its decrypt function publicly so the page's own non-obfuscated handlers can call it. Sure enough, after loading `player.js` in any JS runtime, both of these exist:
 
 ```
-globalThis.vmX_2fe282 = { _$bvRnub: <fn>, _L: <fn> }
+globalThis._L                  = <fn>             // direct global, present on every version we've seen
+globalThis.vmz_8c3fe5          = { _L: <fn>, … }  // also exposed on a namespace; the prefix (vmX_, vmz_, …) rotates
 ```
 
 `_L` is the decrypt function. We don't need to reverse the obfuscation. We just need to call `_L`.
@@ -215,13 +216,13 @@ globalThis.vmX_2fe282 = { _$bvRnub: <fn>, _L: <fn> }
 
 `lib/decrypt.js`:
 
-1. Fetch `player.js` + `script.js` from upstream's CDN once. Cache the source in SQLite (`upstream-script:*`, TTL 6 h — picks up upstream rotations automatically).
+1. Fetch `player.js` + `script.js` from upstream's CDN once. Cache the source in SQLite (`upstream-script:*`, TTL 6 h — picks up upstream rotations automatically). The CDN host + version pin in the URL change a couple of times a year (`assets.lk21.party/?v=4` → `assets.showcdnx.com/?v=8` in Nov 2026); when discovery starts failing for everyone, that's usually the cause — bump the two URL constants in `lib/decrypt.js`.
 2. Build a single jsdom instance with a minimal DOM stub (`<ul id="player-list">`). Evaluate both scripts inside it.
-3. **Dynamic discovery:** scan every property of every `globalThis.vmX_<hex>` namespace, call each function with the first encrypted token we need, and pick the one that returns a string starting with `https://`. That's the decrypt fn. Cache the reference for the process lifetime.
+3. **Dynamic discovery:** try `window._L` first (stable across versions); if it doesn't return a URL, scan every property of every `vm[A-Za-z]_<hex>` namespace on `window`, call each function with the first encrypted token we need, and pick the one that returns a string starting with `https://`. Cache the reference for the process lifetime.
 4. Decryption is now a synchronous function call: `decrypt(token) → "https://playeriframe.sbs/iframe/<player>/<id>"`.
 5. The decrypted wrapper URL is fed through `resolveInnerUrl` (HTTP fetch + parse out the inner `<iframe src>`) to get the deep embed URL like `https://emturbovid.com/t/...`.
 
-**Why dynamic discovery (instead of hardcoding `vmX_2fe282._L`):** both names are randomized on every obfuscation pass. The hex suffix `2fe282` and the function name `_L` will change. The *behavior* — a function on a `vmX_*` namespace that decrypts a token to an URL — won't.
+**Why dynamic discovery (instead of hardcoding `vmz_8c3fe5._L`):** all of those names are randomized on every obfuscation pass. We've seen the namespace prefix rotate (`vmX_` → `vmz_`) and the hex suffix and inner function name change with it. The *behavior* — a function on a `vm*_<hex>` namespace that decrypts a token to a URL — has stayed constant, and `globalThis._L` is exposed on every version we've encountered.
 
 **Caching layers keep the sandbox cold most of the time:**
 
@@ -243,7 +244,8 @@ Compared to a headless-Chromium approach: same warm performance, **~4× faster c
 
 | Failure mode | Effect | Recovery |
 |---|---|---|
-| Upstream regenerates `player.js` (new VM names) | Cached scripts go stale | Auto re-fetch every 6 h; manually call `invalidateInit()` to force sooner |
+| Upstream regenerates `player.js` (new VM names) | Cached scripts go stale | Auto re-fetch every 6 h; `invalidateInit()` forces a refresh sooner and also drops the cached script bodies |
+| Upstream moves to a new CDN or bumps the `?v=` query (e.g. `assets.lk21.party/?v=4` → `assets.showcdnx.com/?v=8`) | Old URL still serves a working-but-mismatched script; discovery finds `_L` but it returns garbage for the new tokens | Update `PLAYER_JS_URL` / `SCRIPT_JS_URL` in `lib/decrypt.js` |
 | Upstream rotates the AES key | Cached decrypted URLs stop working | Iframe load error → frontend tries the next player → bad entry ages out of cache in ≤12 h |
 | Upstream stops exposing the decrypt fn publicly (unlikely — their own click handlers depend on it) | `discoverDecryptFn` returns null | Resolver falls back to the proxy path for the encrypted token. Player tab will likely fail to play, rest of the site stays up |
 | Algorithm change (e.g. they swap AES for something else) | Discovery still works as long as the new fn outputs `https://…` strings | Auto-adapts |
