@@ -1357,6 +1357,17 @@ _modal?.addEventListener('mousemove', showFsBtn);
 _modal?.addEventListener('touchstart', showFsBtn, { passive: true });
 // Show on any keypress (useful in fullscreen where mouse events are inside iframe)
 document.addEventListener('keydown', showFsBtn);
+// Cross-origin iframes swallow mousemove/touchstart, so the listeners above
+// never fire once the cursor (or finger) is over the video. Two extra signals
+// that DO cross the boundary:
+//   - `mouseenter` on the wrap fires when the cursor crosses into the player
+//     area at all (desktop / trackpad).
+//   - `window blur` fires when the iframe steals focus on click/tap. Filter to
+//     iframe focus only so alt-tabbing to another window doesn't trigger it.
+document.getElementById('player-wrap')?.addEventListener('mouseenter', showFsBtn);
+window.addEventListener('blur', () => {
+  if (document.activeElement?.tagName === 'IFRAME') showFsBtn();
+});
 
 /* ---- Fullscreen the player wrap (not the iframe) so our button can overlay the video ---- */
 function fullscreenPlayer() {
