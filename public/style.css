@@ -711,6 +711,18 @@ body.modal-open { overflow: hidden; }
   background: rgba(0, 0, 0, 0.75);
 }
 
+/* Touch-only devices (tablets, phones) have no hover and can't dispatch
+   mousemove from inside a cross-origin iframe back to the parent. Without this
+   override the overlay buttons fade to opacity:0 after 3s and stay invisible —
+   user ends up tapping blindly. Force them visible whenever the button is
+   shown (display:flex set by the JS) so the user can always see what they're
+   aiming at. */
+@media (hover: none) and (pointer: coarse) {
+  .player-fullscreen-btn,
+  .player-next-ep-btn,
+  .modal-close.auto-hide { opacity: 1 !important; pointer-events: auto !important; }
+}
+
 .player-placeholder {
   position: absolute;
   inset: 0;
