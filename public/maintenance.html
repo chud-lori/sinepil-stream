@@ -58,6 +58,25 @@
       font-size: 14px;
     }
     p:last-child { margin-bottom: 0; }
+    .alt-link {
+      display: inline-block;
+      margin-top: 20px;
+      padding: 10px 20px;
+      background: var(--accent);
+      color: #fff;
+      text-decoration: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      transition: background 0.2s, transform 0.1s;
+    }
+    .alt-link:hover { background: #c50710; }
+    .alt-link:active { transform: scale(0.97); }
+    .alt-hint {
+      margin-top: 14px;
+      font-size: 13px;
+      color: var(--muted);
+    }
     .brand {
       margin-top: 28px;
       padding-top: 20px;
@@ -78,8 +97,10 @@
       </svg>
     </div>
     <h1>We&rsquo;re under maintenance</h1>
-    <p>The upstream player provider rotated their scripts and we&rsquo;re updating the scraper to catch up.</p>
-    <p>Playback will be back shortly. Thanks for your patience.</p>
+    <p>SinepilStream is temporarily offline while we make some improvements.</p>
+    <p>We&rsquo;ll be back shortly. Thanks for your patience.</p>
+    <p class="alt-hint">In the meantime, try one of our other apps:</p>
+    <a class="alt-link" href="https://c.lori.my.id/" target="_blank" rel="noopener">Open c.lori.my.id &rarr;</a>
     <div class="brand"><span class="name">SinepilStream</span></div>
   </main>
 </body>
