@@ -38,6 +38,24 @@ app.use(helmet({
 
 app.use(express.json());
 
+// Maintenance mode — flip via MAINTENANCE_MODE=1 in the environment. When on,
+// every request short-circuits to public/maintenance.html (HTML 503 for normal
+// requests, JSON 503 for /api/*). Useful when upstream rotates and we need to
+// take playback offline while re-engineering the scraper.
+if (process.env.MAINTENANCE_MODE === '1') {
+  const maintenancePath = path.join(__dirname, 'public', 'maintenance.html');
+  app.use((req, res) => {
+    res.status(503);
+    res.set('Cache-Control', 'no-store');
+    res.set('Retry-After', '3600');
+    if (req.path.startsWith('/api/')) {
+      return res.json({ error: 'Service under maintenance — playback temporarily offline' });
+    }
+    res.sendFile(maintenancePath);
+  });
+  console.log('[server] MAINTENANCE_MODE=1 — all routes serving maintenance page');
+}
+
 // Token-bucket rate limit on API routes. Static assets + SPA fallback are free.
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
