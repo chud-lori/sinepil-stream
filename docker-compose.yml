@@ -8,7 +8,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3500
-      - MAINTENANCE_MODE=1   # flip to 0 (or remove) once scraper is re-engineered
+      - MAINTENANCE_MODE=0   # flip to 1 to take playback offline during an upstream rotation
     # Cap container memory. Node ~80MB + jsdom decrypt sandbox ~50MB. 400M
     # leaves plenty of headroom for SQLite + concurrent scrapes. If we breach,
     # Docker OOMs the container and `restart` brings it back.
