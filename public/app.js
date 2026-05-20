@@ -11,11 +11,13 @@ const LS = {
   set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
 };
 
-const HISTORY_KEY    = 'spilstream_history';
-const WISHLIST_KEY   = 'spilstream_wishlist';
-const SYNC_TOKEN_KEY = 'spilstream_sync_token';   // auth — opaque 64-hex string
-const SYNC_CODE_KEY  = 'spilstream_sync_code';    // display only — may expire
-const SYNC_EXP_KEY   = 'spilstream_sync_code_expires_at';
+const HISTORY_KEY        = 'spilstream_history';
+const WISHLIST_KEY       = 'spilstream_wishlist';
+const RECENT_SEARCH_KEY  = 'spilstream_recent_searches'; // per-browser only, never synced
+const SYNC_TOKEN_KEY     = 'spilstream_sync_token';   // auth — opaque 64-hex string
+const SYNC_CODE_KEY      = 'spilstream_sync_code';    // display only — may expire
+const SYNC_EXP_KEY       = 'spilstream_sync_code_expires_at';
+const RECENT_SEARCH_MAX  = 10;
 
 // Hook called after any History/Wishlist mutation. Wired up by Sync below;
 // guarded with try/catch so calls before Sync init don't throw (TDZ).
@@ -60,6 +62,27 @@ const Wishlist = {
     if (Wishlist.has(movie.slug)) { Wishlist.remove(movie.slug); return false; }
     Wishlist.add(movie); return true;
   },
+};
+
+/* ---- Recent searches (per-browser only, never synced) ----
+   Stored as an array of query strings, newest first. Dedupes case-insensitively
+   on add and caps at RECENT_SEARCH_MAX. Distinct from watch history so a user
+   who searches but never clicks still gets a re-runnable trail. */
+const RecentSearches = {
+  all: () => LS.get(RECENT_SEARCH_KEY),
+  add: (q) => {
+    const v = String(q || '').trim();
+    if (!v) return;
+    const lc = v.toLowerCase();
+    const list = LS.get(RECENT_SEARCH_KEY).filter(x => x.toLowerCase() !== lc);
+    list.unshift(v);
+    LS.set(RECENT_SEARCH_KEY, list.slice(0, RECENT_SEARCH_MAX));
+  },
+  remove: (q) => {
+    const lc = String(q || '').toLowerCase();
+    LS.set(RECENT_SEARCH_KEY, LS.get(RECENT_SEARCH_KEY).filter(x => x.toLowerCase() !== lc));
+  },
+  clear: () => LS.set(RECENT_SEARCH_KEY, []),
 };
 
 /* ---- Cross-device sync ----
@@ -394,8 +417,61 @@ function clearSeriesFilter() {
 async function doSearch() {
   const q = document.getElementById('search-input').value.trim();
   if (!q) return;
+  RecentSearches.add(q);   // only save committed (Enter/click) searches, not every keystroke
+  hideSearchHistory();
   showTab('search');
   loadGrid('search-grid', `/api/search?q=${encodeURIComponent(q)}`, 'search-count');
+}
+
+/* ---- Recent-search dropdown ---- */
+function renderSearchHistory() {
+  const panel = document.getElementById('search-history');
+  if (!panel) return;
+  const items = RecentSearches.all();
+  if (items.length === 0) { panel.innerHTML = ''; panel.classList.remove('open'); return; }
+  panel.innerHTML = `
+    <div class="sh-header">
+      <span>Recent searches</span>
+      <button type="button" class="sh-clear" data-action="clearRecentSearches">Clear all</button>
+    </div>
+    <ul class="sh-list">
+      ${items.map(q => `
+        <li class="sh-item">
+          <button type="button" class="sh-run" data-action="runRecentSearch" data-q="${esc(q)}">
+            <svg viewBox="0 0 20 20" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <circle cx="9" cy="9" r="6"/><line x1="14" y1="14" x2="18" y2="18"/>
+            </svg>
+            <span>${esc(q)}</span>
+          </button>
+          <button type="button" class="sh-x" data-action="removeRecentSearch" data-q="${esc(q)}" aria-label="Remove">&#x2715;</button>
+        </li>
+      `).join('')}
+    </ul>`;
+}
+function showSearchHistory() {
+  const panel = document.getElementById('search-history');
+  if (!panel) return;
+  renderSearchHistory();
+  if (RecentSearches.all().length > 0) panel.classList.add('open');
+}
+function hideSearchHistory() {
+  document.getElementById('search-history')?.classList.remove('open');
+}
+function runRecentSearch(q) {
+  const input = document.getElementById('search-input');
+  if (!input) return;
+  input.value = q;
+  doSearch();
+}
+function removeRecentSearch(q) {
+  RecentSearches.remove(q);
+  renderSearchHistory();
+  // If panel emptied, also close it
+  if (RecentSearches.all().length === 0) hideSearchHistory();
+}
+function clearRecentSearches() {
+  RecentSearches.clear();
+  hideSearchHistory();
 }
 
 // Debounced live search. Every keystroke cancels the previous timer + any
@@ -1607,6 +1683,9 @@ const CLICK_ACTIONS = {
   enterSyncCode:      () => enterSyncCode(),
   regenerateSyncCode: () => regenerateSyncCode(),
   disconnectSync:     () => disconnectSync(),
+  runRecentSearch:    (el) => runRecentSearch(el.dataset.q || ''),
+  removeRecentSearch: (el) => removeRecentSearch(el.dataset.q || ''),
+  clearRecentSearches:() => clearRecentSearches(),
 };
 
 document.addEventListener('click', (e) => {
@@ -1630,8 +1709,24 @@ document.addEventListener('change', (e) => {
 // Enter submits immediately; typing kicks off the debounced liveSearch.
 document.getElementById('search-input')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') doSearch();
+  else if (e.key === 'Escape') hideSearchHistory();
 });
-document.getElementById('search-input')?.addEventListener('input', liveSearch);
+document.getElementById('search-input')?.addEventListener('input', () => {
+  hideSearchHistory();   // typing replaces the suggestion list
+  liveSearch();
+});
+document.getElementById('search-input')?.addEventListener('focus', showSearchHistory);
+// `focus` only fires on focus transitions; add `click` so an already-focused
+// input still reopens the panel after we hide it (e.g. just ran a search).
+document.getElementById('search-input')?.addEventListener('click', showSearchHistory);
+// Close the panel when focus moves elsewhere. Delay so a click on a panel item
+// fires before the panel hides itself.
+document.addEventListener('mousedown', (e) => {
+  const panel = document.getElementById('search-history');
+  if (!panel?.classList.contains('open')) return;
+  if (e.target.closest('.search-wrap')) return;
+  hideSearchHistory();
+});
 document.getElementById('url-input')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') watchByUrl();
 });
