@@ -25,5 +25,32 @@ docker compose build --no-cache
 info "Restarting container…"
 docker compose up -d --force-recreate
 
+# Canary scrape — verify the new container can actually resolve a player.
+# Catches upstream rotations (CDN URL, obfuscation, host) at deploy time
+# instead of in production. Skipped when MAINTENANCE_MODE=1 because the
+# maintenance middleware returns 503 for /api/* (expected).
+CANARY_SLUG="${CANARY_SLUG:-180-2026}"
+MAINT="$(grep -E '^\s*-\s*MAINTENANCE_MODE=' docker-compose.yml | grep -oE '=[01]' | tr -d '=')"
+if [ "${MAINT:-0}" = "1" ]; then
+  warn "MAINTENANCE_MODE=1 — skipping canary scrape."
+else
+  info "Waiting for app to accept requests…"
+  for i in $(seq 1 30); do
+    curl -fsS -o /dev/null --max-time 2 "http://localhost:${PORT}/api/home" && break
+    sleep 1
+    [ "$i" = "30" ] && die "App didn't respond on :${PORT} within 30s. Check 'docker compose logs'."
+  done
+
+  info "Canary scrape: GET /api/movie/${CANARY_SLUG}…"
+  resp="$(curl -fsS --max-time 40 "http://localhost:${PORT}/api/movie/${CANARY_SLUG}" || true)"
+  if echo "$resp" | grep -q '"finalUrl":"http'; then
+    info "Canary OK — at least one player resolved."
+  else
+    echo "$resp" | head -c 500 >&2
+    echo >&2
+    die "Canary FAILED — no resolved player URLs. Upstream may have rotated. Check 'docker compose logs sinepilstream' and consider flipping MAINTENANCE_MODE=1."
+  fi
+fi
+
 info "Done."
 docker compose ps
