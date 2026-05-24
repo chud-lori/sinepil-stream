@@ -1130,9 +1130,22 @@ function loadNextEpisode() {
 }
 
 /* ---- Shared: sort players by reliability ---- */
+// StreamWish-family hosts enforce per-file uploader-controlled domain allowlists,
+// so they reliably block embedding on sinepil.lori.my.id. Demote any player whose
+// resolved URL points at one of these so the default-loaded player (index 0) on
+// TV/remote setups isn't a guaranteed "Embedding blocked" page.
+const RESTRICTIVE_HOST_RE = /(?:^|\.)(?:streamwish|embedwish|hlswish|playerwish|weneverbeenfree|ajmidyadfihayh)\.[a-z]+$/i;
+function isRestrictiveHost(url) {
+  try { return RESTRICTIVE_HOST_RE.test(new URL(url).hostname); }
+  catch { return false; }
+}
+
 function sortPlayers(players) {
   const PRIORITY = ['CAST', 'HYDRAX', 'TURBOVIP'];
   return players.slice().sort((a, b) => {
+    const ar = isRestrictiveHost(a.finalUrl || '') ? 1 : 0;
+    const br = isRestrictiveHost(b.finalUrl || '') ? 1 : 0;
+    if (ar !== br) return ar - br;
     const ai = PRIORITY.indexOf((a.label || '').toUpperCase());
     const bi = PRIORITY.indexOf((b.label || '').toUpperCase());
     return (ai === -1 ? PRIORITY.length : ai) - (bi === -1 ? PRIORITY.length : bi);
@@ -1267,6 +1280,18 @@ function loadPlayer(index) {
        </button>`
     : '';
 
+  // Same TV/remote rationale as nextEp: the player-tabs row below the iframe
+  // is unreachable once the cross-origin iframe captures input, so users stuck
+  // on a blocked/broken player need an in-overlay way to cycle sources.
+  const nextSrcIdx = currentPlayers.length > 1 ? (index + 1) % currentPlayers.length : -1;
+  const nextSrcBtnHTML = nextSrcIdx >= 0
+    ? `<button class="player-next-src-btn" id="player-next-src-btn"
+               data-action="loadPlayer" data-index="${nextSrcIdx}"
+               title="Try next player" style="display:flex">
+         Try ${esc(currentPlayers[nextSrcIdx].label || `Player ${nextSrcIdx + 1}`)}
+       </button>`
+    : '';
+
   // Proxied players come from our origin (`/api/proxy?...`), so without sandbox
   // they'd be same-origin with this page and could read `parent.localStorage`
   // (sync token, history) from any hostile script that survives our regex strip.
@@ -1292,6 +1317,7 @@ function loadPlayer(index) {
       <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
     </svg>
   </button>
+  ${nextSrcBtnHTML}
   ${nextEpBtnHTML}`;
 
   // Detect network-level load failures: if the iframe never fires `load`
@@ -1421,14 +1447,17 @@ function showFsBtn() {
   const btn   = document.getElementById('player-fullscreen-btn');
   const close = document.querySelector('.modal-close');
   const next  = document.getElementById('player-next-ep-btn');
+  const src   = document.getElementById('player-next-src-btn');
   if (btn && btn.style.display === 'flex') btn.classList.add('visible');
   if (close && close.classList.contains('auto-hide')) close.classList.add('visible');
   if (next && next.style.display === 'flex') next.classList.add('visible');
+  if (src && src.style.display === 'flex') src.classList.add('visible');
   clearTimeout(_fsIdleTimer);
   _fsIdleTimer = setTimeout(() => {
     document.getElementById('player-fullscreen-btn')?.classList.remove('visible');
     document.querySelector('.modal-close')?.classList.remove('visible');
     document.getElementById('player-next-ep-btn')?.classList.remove('visible');
+    document.getElementById('player-next-src-btn')?.classList.remove('visible');
   }, 3000);
 }
 

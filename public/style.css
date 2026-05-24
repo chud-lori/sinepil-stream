@@ -784,6 +784,38 @@ body.modal-open { overflow: hidden; }
   background: rgba(0, 0, 0, 0.75);
 }
 
+/* "Try next player" overlay — sits below the fullscreen button so it doesn't
+   collide with modal-close (top-right) or next-ep-btn (top, left:48).
+   Critical on TV/remote: the tabs under the iframe become unreachable once
+   the cross-origin iframe steals focus, so this is the only escape from a
+   blocked/broken player. */
+.player-next-src-btn {
+  position: absolute;
+  top: 48px;        /* below fullscreen-btn (top:8 + height:32 + 8px gap) */
+  left: 8px;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.6);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  display: none;
+  align-items: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s, background 0.2s;
+  white-space: nowrap;
+}
+.player-next-src-btn.visible { opacity: 1; }
+.player-next-src-btn:hover   { background: var(--accent); }
+.player-wrap:fullscreen .player-next-src-btn,
+.player-wrap:-webkit-full-screen .player-next-src-btn {
+  background: rgba(0, 0, 0, 0.75);
+}
+
 /* Touch-only devices (tablets, phones) have no hover and can't dispatch
    mousemove from inside a cross-origin iframe back to the parent. Without this
    override the overlay buttons fade to opacity:0 after 3s and stay invisible —
@@ -793,6 +825,7 @@ body.modal-open { overflow: hidden; }
 @media (hover: none) and (pointer: coarse) {
   .player-fullscreen-btn,
   .player-next-ep-btn,
+  .player-next-src-btn,
   .modal-close.auto-hide { opacity: 1 !important; pointer-events: auto !important; }
 }
 
