@@ -21,8 +21,8 @@ SinepilStream server (Node.js / Express)
     │
     ├─ lib/cache.js   : SQLite response cache (SWR + in-flight coalescing)
     ├─ lib/sources/*  : upstream HTML / JSON-LD scraping
-    ├─ lib/resolver.js: encrypted token / playeriframe.sbs wrapper → inner player URL
-    └─ lib/decrypt.js : jsdom sandbox that runs upstream's player.js to decrypt tokens
+    ├─ lib/resolver.js: opaque token / playeriframe.sbs wrapper → inner player URL
+    └─ lib/decrypt.js : sinta.{root} PoW client — resolves opaque tokens to wrapper URLs
 
 Browser renders rails of cards. Clicking a card →
     GET /api/movie/:slug  or  /api/series/:slug
@@ -127,139 +127,105 @@ Plus JSON-LD `TVSeries` for description / director / cast / genre.
 
 ---
 
-## 4. Player resolution — bypassing the AES encryption
+## 4. Player resolution — the sinta PoW challenge
 
-This is the most adversarial part of the scrape. Around Nov 2026 upstream started shipping every player URL as AES-CBC ciphertext, decrypted client-side by a heavily obfuscated `player.js`. Without that decryption the API returns `players: []` and the UI shows *"No player sources found."*
+This is the most adversarial part of the scrape. Player URLs aren't on the source page directly — they're opaque tokens. Resolving each token to a real embed URL means clearing upstream's anti-scraping gate: a server-side **proof-of-work challenge** at `sinta.{rootDomain}`.
 
-This section walks through how SinepilStream gets past it without running a real browser — including the byte-level evidence and the structural quirk in the obfuscator that opened the door.
+### What the source page actually contains
 
-### What changed
-
-The source page's player tabs used to look like this:
+Player tabs are `<select><option>` rows with opaque values:
 
 ```html
-<a data-url="https://playeriframe.sbs/iframe/cast/abc123" data-server="CAST">CAST</a>
+<select id="player-select">
+  <option value="Mn6nHibKcYtQowT6wLx6lcX2H00ooz2MpEErEf8I6ilR0JzFz1V…" data-server="p2p" selected>GANTI PLAYER P2P</option>
+  <option value="PSzpT0pXpnWi51pfOqLnx1KlkxpMQ-JMkCNZJnQ5RdaZMG0ryc…" data-server="turbovip">GANTI PLAYER TURBOVIP</option>
+  <option value="o9CgGizrxsfn-UNEVzDETfUw9v_8A6W4EYowXs2S4EqeUNymhn…" data-server="cast">GANTI PLAYER CAST</option>
+  <option value="_ppVQw-PIJpg-KAHnEeLNXYumNT59SeJDj9eWLeaIY_KX2fijd…" data-server="hydrax">GANTI PLAYER HYDRAX</option>
+</select>
 ```
 
-That's a plain HTTP URL — we'd fetch it server-side and pull out the inner `<iframe src="…">`. Easy.
+The values are opaque IDs — they're not URLs, not base64-encoded ciphertext, not anything we can decode locally. They're just keys upstream looks up server-side after we prove we can do real work.
 
-Now they look like this:
+### The handshake
 
-```html
-<a data-url="YuvLljMYIlUgNITzceX+NKlGMbWCwksz…" data-server="CAST">CAST</a>
-```
-
-A base64-encoded blob. The plain URL is produced inside the browser by an obfuscated `player.js` decrypting the blob and assigning the result to `iframe.src`. Server-side, we never see the real URL — only the ciphertext.
-
-### Step 1 — confirm the algorithm
-
-Before picking an approach, we needed to know what kind of crypto we're up against. Base64-decoded a handful of tokens from the *same* page and dumped the raw bytes side-by-side:
-
-```
-Token A (P2P):       62eb cb96 3318 2255 2034 84f3 71e5 fe34  a946 31b5 82c2 4b33 34c8 4734 f01b 0708  5b86 …
-Token B (TURBOVIP):  62eb cb96 3318 2255 2034 84f3 71e5 fe34  a946 31b5 82c2 4b33 34c8 4734 f01b 0708  fxVDY …
-Token C (CAST):      62eb cb96 3318 2255 2034 84f3 71e5 fe34  a946 31b5 82c2 4b33 34c8 4734 f01b 0708  Ixl …
-```
-
-Every token shares the *exact same first 32 bytes*. In AES-CBC with a fixed key + fixed IV, ciphertext block N is identical across messages iff plaintext blocks 1..N are identical. So plaintext blocks 1 and 2 (32 bytes total) are identical across all tokens — overwhelmingly likely to be the literal string `https://playeriframe.sbs/iframe/` (which is exactly 32 chars). The variable bytes after byte 32 are the per-player path (`cast/abc123` vs `turbovip/def456` etc.).
-
-So: **AES-CBC, fixed IV, layout `[ enc(p1) | enc(p2) | enc(p3) | … ]`**.
-
-This rules out a key-recovery attack — known-plaintext doesn't break AES. We'd need the key, and that lives somewhere inside the obfuscated `player.js`.
-
-### Step 2 — is there an HTTP shortcut?
-
-The cheapest possible bypass would be a server-side decrypt endpoint we could just call. Loaded the source page in puppeteer with `page.on('request')` logging every URL + POST body during player tab clicks. Result: **no request anywhere carries the token or any fragment of it.** Decryption is 100% client-side. No shortcut.
-
-### Step 3 — static deobfuscation vs running their JS
-
-Two viable ways to get a server-side decrypt:
-
-1. **Static** — parse `player.js`, dump its constants, reconstruct the AES key + IV, write a 20-line decrypt in pure Node.
-2. **Dynamic** — run `player.js` in a JS environment and let it decrypt for us.
-
-`player.js` is `obfuscator.io`-VM-style. It ships its own bytecode interpreter (`vmU_<hex>`) with constants stored as base64-marshalled blobs:
+The in-browser `player.js` reveals the protocol:
 
 ```js
-let p = ["AQgAAQAAAAoMCBJfMHgzOGIyNDU…", "AQAIAQACFDwEAAgSXzB4MzhiMjQ1…"];
-```
-
-Static deobfuscation would mean reimplementing the VM byte-for-byte — multi-day work that rots on every upstream regen (the `?v=4` cache-buster on their script URL is the giveaway that they iterate often). Dynamic execution adapts automatically. Pick (2).
-
-The naive way to do (2) is headless Chromium — it works, but costs ~190 MB of Chrome binary, ~250 MB peak RAM, and ~3-5 s cold scrape. So we looked for something lighter.
-
-### Step 4 — the opening: a public symbol
-
-The obfuscator hides the VM's *internals*, but the page itself contains plain JS that calls into the VM. Scrolled to the tail of `player.js`, past all the obfuscated junk, and found the part that wires up DOM event handlers:
-
-```js
-for (var c = document.querySelectorAll("#player-list a"), f = 0; f < c.length; f++)
-  c[f].addEventListener("click", function (e) {
-    e.preventDefault();
-    var t = _L(this.dataset.url),     // ← decrypt happens here
-        r = document.getElementById("main-player");
-    r.src = t;
-    …
+function doChallengeAndLoad(e) {
+  var t = "https://sinta." + getRootDomain(window.location.href);   // sinta.lk21official.cc
+  sendXHR({ url: t + "/challenge.php?id=" + encodeURIComponent(e), method: "GET",
+    success: function (r) {
+      if (r.trusted && r.url) {                                      // some tokens skip PoW
+        a.src = r.url;
+      } else {
+        solvePow(r.challenge, r.difficulty, function (nonce) {       // SHA-256 hashcash
+          sendXHR({ url: t + "/verify.php", method: "POST",
+                    data: { challenge: r.challenge, nonce, id: e, fp: getFingerprint() },
+                    success: function (v) { a.src = v.url; } });
+        });
+      }
+    }
   });
+}
 ```
 
-`_L` is referenced as a **bare global identifier**. The obfuscator has to expose its decrypt function publicly so the page's own non-obfuscated handlers can call it. Sure enough, after loading `player.js` in any JS runtime, both of these exist:
+Three calls:
 
-```
-globalThis._L                  = <fn>             // direct global, present on every version we've seen
-globalThis.vmz_8c3fe5          = { _L: <fn>, … }  // also exposed on a namespace; the prefix (vmX_, vmz_, …) rotates
-```
+1. **`GET sinta.{root}/challenge.php?id={token}`** → `{ challenge, difficulty }` (a hex string + N).
+2. **PoW** — find a nonce such that `SHA-256(challenge + nonce)` starts with `difficulty` hex zeros.
+3. **`POST sinta.{root}/verify.php`** with JSON `{ challenge, nonce, id, fp }` → `{ url: "https://playeriframe.sbs/iframe/<player>/<id>" }`.
 
-`_L` is the decrypt function. We don't need to reverse the obfuscation. We just need to call `_L`.
+`sendXHR` uses `Content-Type: application/json` for POSTs — sending the verify body form-encoded gets a generic `"Invalid request"` 200 back. The fingerprint is a 5-field pipe-joined string built from `navigator.userAgent | platform | screen.WxH | tz-offset | hardwareConcurrency`. The server reads it but doesn't strictly validate values — anything plausibly-shaped passes.
 
-### Step 5 — implementation: jsdom + dynamic discovery
+### Implementation
 
-`lib/decrypt.js`:
+`lib/decrypt.js` is a thin pure-Node client. Per token:
 
-1. Fetch `player.js` + `script.js` from upstream's CDN once. Cache the source in SQLite (`upstream-script:*`, TTL 6 h — picks up upstream rotations automatically). The CDN host + version pin in the URL change a couple of times a year (`assets.lk21.party/?v=4` → `assets.showcdnx.com/?v=8` in Nov 2026); when discovery starts failing for everyone, that's usually the cause — bump the two URL constants in `lib/decrypt.js`.
-2. Build a single jsdom instance with a minimal DOM stub (`<ul id="player-list">`). Evaluate both scripts inside it.
-3. **Dynamic discovery:** try `window._L` first (stable across versions); if it doesn't return a URL, scan every property of every `vm[A-Za-z]_<hex>` namespace on `window`, call each function with the first encrypted token we need, and pick the one that returns a string starting with `https://`. Cache the reference for the process lifetime.
-4. Decryption is now a synchronous function call: `decrypt(token) → "https://playeriframe.sbs/iframe/<player>/<id>"`.
-5. The decrypted wrapper URL is fed through `resolveInnerUrl` (HTTP fetch + parse out the inner `<iframe src>`) to get the deep embed URL like `https://emturbovid.com/t/...`.
+1. Derive `sinta.{root}` from the scrape's referer (`getRootDomain` returns the last two hostname labels: `tv10.lk21official.cc` → `lk21official.cc`).
+2. `axios.get` `challenge.php`. If `trusted && url`, skip PoW.
+3. Spin `crypto.createHash('sha256').update(challenge + nonce).digest('hex')` in a tight loop until prefix matches. Capped at `POW_MAX_ITERATIONS` (16 M) so a difficulty spike can't hang the request.
+4. `axios.post` `verify.php` as JSON. Return `verify.url` or `null`.
 
-**Why dynamic discovery (instead of hardcoding `vmz_8c3fe5._L`):** all of those names are randomized on every obfuscation pass. We've seen the namespace prefix rotate (`vmX_` → `vmz_`) and the hex suffix and inner function name change with it. The *behavior* — a function on a `vm*_<hex>` namespace that decrypts a token to a URL — has stayed constant, and `globalThis._L` is exposed on every version we've encountered.
+All tokens for a movie are resolved in parallel via `Promise.all`. The returned wrapper URL is then handed to `resolveInnerUrl` (HTTP fetch + parse out the inner `<iframe src>`) to get the deep embed URL like `https://emturbovid.com/t/...`.
 
-**Caching layers keep the sandbox cold most of the time:**
+**Caching:**
 
-- `player:<encrypted-token>` (TTL 12 h) — once we've decrypted a token, we don't decrypt it again for 12 h.
+- `player:<token>` (TTL 12 h) — verify returns the same wrapper URL for the same token across requests; cache the wrapper.
 - The detail-page response cache (30 min) layered on top means the whole movie scrape often skips the source-site fetch too.
 
 ### Performance
 
 | Stage | Time |
 |---|---|
-| jsdom init + upstream-script fetch + decrypt-fn discovery | ~280 ms (once per 6 h) |
-| Per-token decrypt | ~0.25 ms |
-| Cold scrape end-to-end (uncached movie) | ~1.2 s (dominated by source-site HTML fetch) |
-| Warm cache hit | 0 ms |
+| `challenge.php` round-trip | ~50–80 ms |
+| PoW solve at difficulty 4 (~32 k SHA-256 hashes) | ~70 ms |
+| `verify.php` round-trip | ~50–80 ms |
+| Per-token total (cold) | ~200 ms |
+| Per-token total (warm cache hit) | 0 ms |
+| Cold scrape end-to-end (uncached movie, all tokens in parallel) | ~600–900 ms |
 
-Compared to a headless-Chromium approach: same warm performance, **~4× faster cold, ~200 MB less disk, ~200 MB less peak RAM**.
+Higher PoW difficulty scales roughly 16× per step: difficulty 5 ≈ ~1 s, difficulty 6 ≈ ~18 s. The cap (`POW_MAX_ITERATIONS = 16 M`) gives ~30 s wall time worst-case before a token is dropped.
 
 ### When this breaks (and what we do about it)
 
 | Failure mode | Effect | Recovery |
 |---|---|---|
-| Upstream regenerates `player.js` (new VM names) | Cached scripts go stale | Auto re-fetch every 6 h; `invalidateInit()` forces a refresh sooner and also drops the cached script bodies |
-| Upstream moves to a new CDN or bumps the `?v=` query (e.g. `assets.lk21.party/?v=4` → `assets.showcdnx.com/?v=8`) | Old URL still serves a working-but-mismatched script; discovery finds `_L` but it returns garbage for the new tokens | Update `PLAYER_JS_URL` / `SCRIPT_JS_URL` in `lib/decrypt.js` |
-| Upstream rotates the AES key | Cached decrypted URLs stop working | Iframe load error → frontend tries the next player → bad entry ages out of cache in ≤12 h |
-| Upstream stops exposing the decrypt fn publicly (unlikely — their own click handlers depend on it) | `discoverDecryptFn` returns null | Resolver falls back to the proxy path for the encrypted token. Player tab will likely fail to play, rest of the site stays up |
-| Algorithm change (e.g. they swap AES for something else) | Discovery still works as long as the new fn outputs `https://…` strings | Auto-adapts |
-| `player.js` starts depending on a browser API jsdom doesn't have | Discovery fails at init | Need to either polyfill the missing API or fall back to a real browser |
+| Upstream rotates root domain (`lk21official.cc` → new TLD) | `sinta.<oldRoot>` stops resolving; tokens return null | `lib/sources/movies-host.js` failover already updates the active host; `rootDomainFromReferer` derives the new `sinta.{root}` automatically |
+| Upstream raises PoW difficulty past 5–6 | Solve time blows past the iteration cap; tokens return null | Bump `POW_MAX_ITERATIONS` if the wait is acceptable, or move the PoW into a worker thread to keep the event loop responsive |
+| Upstream changes the challenge format (different hash, different prefix encoding) | All tokens return null | Inspect upstream's `solvePow` in the live `player.js`; update `solvePow()` in `lib/decrypt.js` |
+| Upstream rejects our requests (rate limit, fingerprint heuristics) | `challenge.php` 4xx or `verify.php` returns `success: false` | Throttle, randomise fingerprint, or proxy through a residential IP |
+| Upstream returns a wrapper URL that's not `playeriframe.sbs` | `resolveInnerUrl` doesn't recognize it | Wrapper is passed through as-is (see `resolveEncrypted` in `lib/resolver.js`); usually still embeddable |
 
 ### Legacy plain-URL flow
 
-A handful of older pages still ship plain `playeriframe.sbs` URLs in `data-url` instead of encrypted tokens. For those, `resolveInnerUrl` HTTP-fetches the URL and extracts the deep `<iframe src>` from the response. No decryption needed. Same final step as the encrypted-token flow — the two paths converge before caching.
+A handful of older pages still ship plain `playeriframe.sbs` URLs in `data-url` instead of opaque tokens. For those, `resolveInnerUrl` HTTP-fetches the URL and extracts the deep `<iframe src>` directly. No challenge round-trip. Same final step as the token flow — the two paths converge before caching.
 
 ### Common post-resolution
 
 For both flows:
 
-- If resolution fails entirely, set `finalUrl` to `/api/proxy?url=<original-src>` as a fallback — our proxy fetches the wrapper server-side, strips CSP headers, and injects a referrer-spoof so the iframe renders inside our domain.
+- If resolution fails for a **plain-URL** src, route it through `/api/proxy?url=<original-src>` — our proxy fetches the wrapper server-side, strips CSP headers, and injects a referrer-spoof so the iframe renders inside our domain.
+- If resolution fails for an **opaque token** (the PoW handshake failed), the player tab is dropped — there's no URL to proxy and rendering `/api/proxy?url=<token>` would just yield an "Invalid URL" 400 from the SSRF guard.
 - Drop P2P (`cloud.hownetwork.xyz`) entirely — it's behind Cloudflare JS challenges and hostname checks that can never be satisfied server-side.
 
 The frontend ends up with pre-resolved `finalUrl` values, so clicking a player tab is instant — no round-trip.
@@ -291,9 +257,9 @@ Object.defineProperty(document, 'referrer', {
 });
 ```
 
-### Encrypted player tokens
+### Opaque player tokens
 
-Upstream's `obfuscator.io`-VM `player.js` decrypts AES-encrypted player URLs client-side. We don't reverse the obfuscation — we run it (in jsdom, not a real browser). See Section 4 for the flow.
+Player tabs ship as opaque IDs that resolve to wrapper URLs only after clearing upstream's `sinta.{root}` proof-of-work gate. We mirror the in-browser handshake in pure Node — challenge → SHA-256 hashcash → verify. See Section 4 for the protocol.
 
 ### Source host rotation
 

@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Install dependencies first (layer cache).
 # node:20-slim is Debian-based — better-sqlite3 uses its pre-built Linux binary,
-# no C++ compilation needed. jsdom is pure JS — no native libs needed.
+# no C++ compilation needed.
 COPY package*.json ./
 RUN npm install --omit=dev
 

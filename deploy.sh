@@ -41,6 +41,16 @@ else
     [ "$i" = "30" ] && die "App didn't respond on :${PORT} within 30s. Check 'docker compose logs'."
   done
 
+  # Flush the SQLite response cache — entries from the previous container are
+  # otherwise served verbatim for up to 30 min, masking shape-changing fixes
+  # (e.g. token-resolution URL format changes) until they age out. Safe by
+  # construction: response_cache is a dedicated cache table; user data (sync
+  # pair codes, watch history, catalog) lives in separate tables.
+  info "Flushing response cache…"
+  docker compose exec -T "${APP}" node -e \
+    "require('better-sqlite3')('/app/data/movies.db').exec(\"DELETE FROM response_cache\"); console.log('[cache] flushed')" \
+    || warn "Cache flush failed — continuing; entries will expire naturally within 30 min."
+
   info "Canary scrape: GET /api/movie/${CANARY_SLUG}…"
   resp="$(curl -fsS --max-time 40 "http://localhost:${PORT}/api/movie/${CANARY_SLUG}" || true)"
   if echo "$resp" | grep -q '"finalUrl":"http'; then
