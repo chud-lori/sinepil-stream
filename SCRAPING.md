@@ -22,7 +22,7 @@ SinepilStream server (Node.js / Express)
     ├─ lib/cache.js   : SQLite response cache (SWR + in-flight coalescing)
     ├─ lib/sources/*  : upstream HTML / JSON-LD scraping
     ├─ lib/resolver.js: opaque token / playeriframe.sbs wrapper → inner player URL
-    └─ lib/decrypt.js : sinta.{root} PoW client — resolves opaque tokens to wrapper URLs
+    └─ lib/decrypt.js : XOR-decoder — turns opaque tokens into playeriframe.sbs wrapper URLs
 
 Browser renders rails of cards. Clicking a card →
     GET /api/movie/:slug  or  /api/series/:slug
@@ -127,93 +127,77 @@ Plus JSON-LD `TVSeries` for description / director / cast / genre.
 
 ---
 
-## 4. Player resolution — the sinta PoW challenge
+## 4. Player resolution — the XOR token decode
 
-This is the most adversarial part of the scrape. Player URLs aren't on the source page directly — they're opaque tokens. Resolving each token to a real embed URL means clearing upstream's anti-scraping gate: a server-side **proof-of-work challenge** at `sinta.{rootDomain}`.
+Player URLs aren't on the source page directly — they're opaque tokens. But despite first appearances, resolving them needs no network round-trip at all: each token is a base64-wrapped XOR ciphertext, and the upstream's own `player.js` decodes them client-side with a hardcoded key. We mirror the same decode in Node.
 
 ### What the source page actually contains
 
-Player tabs are `<select><option>` rows with opaque values:
+Player tabs are `<a data-url>` rows (mirrored into a `<select>` for the mobile dropdown) with opaque values:
 
 ```html
-<select id="player-select">
-  <option value="Mn6nHibKcYtQowT6wLx6lcX2H00ooz2MpEErEf8I6ilR0JzFz1V…" data-server="p2p" selected>GANTI PLAYER P2P</option>
-  <option value="PSzpT0pXpnWi51pfOqLnx1KlkxpMQ-JMkCNZJnQ5RdaZMG0ryc…" data-server="turbovip">GANTI PLAYER TURBOVIP</option>
-  <option value="o9CgGizrxsfn-UNEVzDETfUw9v_8A6W4EYowXs2S4EqeUNymhn…" data-server="cast">GANTI PLAYER CAST</option>
-  <option value="_ppVQw-PIJpg-KAHnEeLNXYumNT59SeJDj9eWLeaIY_KX2fijd…" data-server="hydrax">GANTI PLAYER HYDRAX</option>
-</select>
+<ul id="player-list">
+  <li><a data-url="JB9GQSBPRFwVHzIcCRMFEzgAFARkEhsSZQgfE0AhDh1BYQVERQBEZlIOA1tDfVAdVHMFHAd8A05XR3gNVAZlQ19CVko=" data-server="p2p">P2P</a></li>
+  <li><a data-url="JB9GQSBPRFwVHzIcCRMFEzgAFARkEhsSZQgfE0AhDh1FJgcJHBMaI0ojVjw6eyYYL3gwNVMgCQ0SRi46Qw==" data-server="turbovip">TURBOVIP</a></li>
+  <li><a data-url="JB9GQSBPRFwVHzIcCRMFEzgAFARkEhsSZQgfE0AhDh1SMgYfXAIaIVIAGBUYcwpOFQ==" data-server="cast">CAST</a></li>
+  <li><a data-url="JB9GQSBPRFwVHzIcCRMFEzgAFARkEhsSZQgfE0AhDh1ZKhEZEh1cFScIMl0dLwNI" data-server="hydrax">HYDRAX</a></li>
+</ul>
 ```
 
-The values are opaque IDs — they're not URLs, not base64-encoded ciphertext, not anything we can decode locally. They're just keys upstream looks up server-side after we prove we can do real work.
+Each `data-url` is `base64(plaintext ⊕ KEY repeating)` where the plaintext is a `playeriframe.sbs/iframe/<vendor>/<id>` URL.
 
-### The handshake
+### The decode
 
-The in-browser `player.js` reveals the protocol:
+The in-browser `player.js` (`https://assets.showcdnx.com/js/player.js`) shows the whole protocol in eight lines:
 
 ```js
-function doChallengeAndLoad(e) {
-  var t = "https://sinta." + getRootDomain(window.location.href);   // sinta.lk21official.cc
-  sendXHR({ url: t + "/challenge.php?id=" + encodeURIComponent(e), method: "GET",
-    success: function (r) {
-      if (r.trusted && r.url) {                                      // some tokens skip PoW
-        a.src = r.url;
-      } else {
-        solvePow(r.challenge, r.difficulty, function (nonce) {       // SHA-256 hashcash
-          sendXHR({ url: t + "/verify.php", method: "POST",
-                    data: { challenge: r.challenge, nonce, id: e, fp: getFingerprint() },
-                    success: function (v) { a.src = v.url; } });
-        });
-      }
-    }
-  });
+function doChallengeAndLoad(e) {                            // the name is misleading — no challenge anymore
+  var t = document.getElementById("main-player"),
+      a = "",
+      o = "Lk21SuksesSelaluJayaJayaJaya!";                 // 29-byte XOR key, hardcoded
+  e = atob(e);                                              // base64 → raw bytes
+  for (var l = 0; l < e.length; l++)
+    a += String.fromCharCode(e.charCodeAt(l) ^ o.charCodeAt(l % 29));
+  t.src = a;                                                // direct iframe src
 }
 ```
 
-Three calls:
-
-1. **`GET sinta.{root}/challenge.php?id={token}`** → `{ challenge, difficulty }` (a hex string + N).
-2. **PoW** — find a nonce such that `SHA-256(challenge + nonce)` starts with `difficulty` hex zeros.
-3. **`POST sinta.{root}/verify.php`** with JSON `{ challenge, nonce, id, fp }` → `{ url: "https://playeriframe.sbs/iframe/<player>/<id>" }`.
-
-`sendXHR` uses `Content-Type: application/json` for POSTs — sending the verify body form-encoded gets a generic `"Invalid request"` 200 back. The fingerprint is a 5-field pipe-joined string built from `navigator.userAgent | platform | screen.WxH | tz-offset | hardwareConcurrency`. The server reads it but doesn't strictly validate values — anything plausibly-shaped passes.
+(Earlier rotations of `player.js` did use a server-side proof-of-work challenge at `sinta.{rootDomain}` — hence the function name. The `sinta` endpoints may still exist but are no longer wired into the page.)
 
 ### Implementation
 
-`lib/decrypt.js` is a thin pure-Node client. Per token:
+`lib/decrypt.js` is a pure synchronous function. Per token:
 
-1. Derive `sinta.{root}` from the scrape's referer (`getRootDomain` returns the last two hostname labels: `tv10.lk21official.cc` → `lk21official.cc`).
-2. `axios.get` `challenge.php`. If `trusted && url`, skip PoW.
-3. Spin `crypto.createHash('sha256').update(challenge + nonce).digest('hex')` in a tight loop until prefix matches. Capped at `POW_MAX_ITERATIONS` (16 M) so a difficulty spike can't hang the request.
-4. `axios.post` `verify.php` as JSON. Return `verify.url` or `null`.
+1. `Buffer.from(token, 'base64')` → raw bytes.
+2. XOR each byte with `XOR_KEY.charCodeAt(i % XOR_KEY.length)` to recover the plaintext URL.
+3. Sanity-check the result starts with `http://` or `https://` and return it (or `null` for junk input).
 
-All tokens for a movie are resolved in parallel via `Promise.all`. The returned wrapper URL is then handed to `resolveInnerUrl` (HTTP fetch + parse out the inner `<iframe src>`) to get the deep embed URL like `https://emturbovid.com/t/...`.
+No network call, no PoW, no fingerprinting. The returned wrapper URL is then handed to `resolveInnerUrl` (HTTP fetch + parse out the inner `<iframe src>`) to get the deep embed URL like `https://emturbovid.com/t/...`.
 
 **Caching:**
 
-- `player:<token>` (TTL 12 h) — verify returns the same wrapper URL for the same token across requests; cache the wrapper.
+- `player:<token>` (TTL 12 h) — caches the *inner* embed URL (the result of `resolveInnerUrl` on top of the XOR-decoded wrapper). The XOR step itself is so cheap (microseconds) that caching just the wrapper would be pointless; the value is the avoided HTTP fetch of `playeriframe.sbs`.
 - The detail-page response cache (30 min) layered on top means the whole movie scrape often skips the source-site fetch too.
 
 ### Performance
 
 | Stage | Time |
 |---|---|
-| `challenge.php` round-trip | ~50–80 ms |
-| PoW solve at difficulty 4 (~32 k SHA-256 hashes) | ~70 ms |
-| `verify.php` round-trip | ~50–80 ms |
+| XOR decode per token | <1 ms |
+| `playeriframe.sbs` wrapper fetch (`resolveInnerUrl`) | ~150–250 ms |
 | Per-token total (cold) | ~200 ms |
 | Per-token total (warm cache hit) | 0 ms |
 | Cold scrape end-to-end (uncached movie, all tokens in parallel) | ~600–900 ms |
 
-Higher PoW difficulty scales roughly 16× per step: difficulty 5 ≈ ~1 s, difficulty 6 ≈ ~18 s. The cap (`POW_MAX_ITERATIONS = 16 M`) gives ~30 s wall time worst-case before a token is dropped.
+The hard cost is the wrapper HTTP fetch, not the decode. Tokens are decoded synchronously in a single tick; the wrapper fetches all run in parallel via `Promise.all`.
 
 ### When this breaks (and what we do about it)
 
 | Failure mode | Effect | Recovery |
 |---|---|---|
-| Upstream rotates root domain (`lk21official.cc` → new TLD) | `sinta.<oldRoot>` stops resolving; tokens return null | `lib/sources/movies-host.js` failover already updates the active host; `rootDomainFromReferer` derives the new `sinta.{root}` automatically |
-| Upstream raises PoW difficulty past 5–6 | Solve time blows past the iteration cap; tokens return null | Bump `POW_MAX_ITERATIONS` if the wait is acceptable, or move the PoW into a worker thread to keep the event loop responsive |
-| Upstream changes the challenge format (different hash, different prefix encoding) | All tokens return null | Inspect upstream's `solvePow` in the live `player.js`; update `solvePow()` in `lib/decrypt.js` |
-| Upstream rejects our requests (rate limit, fingerprint heuristics) | `challenge.php` 4xx or `verify.php` returns `success: false` | Throttle, randomise fingerprint, or proxy through a residential IP |
+| Upstream rotates the XOR key (changes the string in `player.js`) | Every token decodes to garbage; the http(s) sanity check rejects them all and returns null | Fetch the live `player.js` (`https://assets.showcdnx.com/js/player.js`), find the `o = "..."` literal inside `doChallengeAndLoad`, update `XOR_KEY` in `lib/decrypt.js` |
+| Upstream switches scheme entirely (e.g. back to a server PoW, or a different cipher) | Tokens stop decoding; the http(s) sanity check rejects them | Re-read `player.js` and re-implement whatever `doChallengeAndLoad` (or its successor) does |
+| Upstream changes container element selectors (`#player-list`, `#player-select`) | `rawPlayers` ends up empty in `lib/sources/movies.js` before decode even runs | Update the cheerio selectors in `getMovie`/`getEpisode` |
 | Upstream returns a wrapper URL that's not `playeriframe.sbs` | `resolveInnerUrl` doesn't recognize it | Wrapper is passed through as-is (see `resolveEncrypted` in `lib/resolver.js`); usually still embeddable |
 
 ### Legacy plain-URL flow
@@ -225,7 +209,7 @@ A handful of older pages still ship plain `playeriframe.sbs` URLs in `data-url` 
 For both flows:
 
 - If resolution fails for a **plain-URL** src, route it through `/api/proxy?url=<original-src>` — our proxy fetches the wrapper server-side, strips CSP headers, and injects a referrer-spoof so the iframe renders inside our domain.
-- If resolution fails for an **opaque token** (the PoW handshake failed), the player tab is dropped — there's no URL to proxy and rendering `/api/proxy?url=<token>` would just yield an "Invalid URL" 400 from the SSRF guard.
+- If resolution fails for an **opaque token** (the XOR decode produced something that isn't a URL), the player tab is dropped — there's no URL to proxy and rendering `/api/proxy?url=<token>` would just yield an "Invalid URL" 400 from the SSRF guard.
 - Drop P2P (`cloud.hownetwork.xyz`) entirely — it's behind Cloudflare JS challenges and hostname checks that can never be satisfied server-side.
 
 The frontend ends up with pre-resolved `finalUrl` values, so clicking a player tab is instant — no round-trip.
@@ -259,7 +243,7 @@ Object.defineProperty(document, 'referrer', {
 
 ### Opaque player tokens
 
-Player tabs ship as opaque IDs that resolve to wrapper URLs only after clearing upstream's `sinta.{root}` proof-of-work gate. We mirror the in-browser handshake in pure Node — challenge → SHA-256 hashcash → verify. See Section 4 for the protocol.
+Player tabs ship as opaque IDs that XOR-decode (with a hardcoded key lifted from upstream's `player.js`) to `playeriframe.sbs` wrapper URLs. We mirror the in-browser decode in pure Node. See Section 4 for the protocol.
 
 ### Source host rotation
 
