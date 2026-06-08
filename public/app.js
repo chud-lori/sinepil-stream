@@ -1141,7 +1141,7 @@ function isRestrictiveHost(url) {
 }
 
 function sortPlayers(players) {
-  const PRIORITY = ['CAST', 'HYDRAX', 'TURBOVIP'];
+  const PRIORITY = ['HYDRAX', 'TURBOVIP', 'CAST'];
   return players.slice().sort((a, b) => {
     const ar = isRestrictiveHost(a.finalUrl || '') ? 1 : 0;
     const br = isRestrictiveHost(b.finalUrl || '') ? 1 : 0;
