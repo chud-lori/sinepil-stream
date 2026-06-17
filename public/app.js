@@ -975,6 +975,11 @@ async function openSeries(slug, { pushHistory = true, autoEpisode } = {}) {
     const data = await res.json();
     if (data.error) throw new Error(data.error);
 
+    if (data.isMovie) {
+      history.replaceState({ slug, kind: 'movie' }, '', '/movie/' + encodeURIComponent(slug));
+      return openMovie(slug, { pushHistory: false });
+    }
+
     currentSeries = data;
     currentMovie  = { ...data, kind: 'series' };
 
@@ -1178,6 +1183,7 @@ async function openMovie(slug, { pushHistory = true } = {}) {
 
     if (data.isSeries) {
       // Source classified it as a series — hand off to series flow
+      history.replaceState({ slug, kind: 'series' }, '', '/series/' + encodeURIComponent(slug));
       return openSeries(slug, { pushHistory: false });
     }
 
