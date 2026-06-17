@@ -1,4 +1,6 @@
 const scraper = require('../lib');
+const movieHost = require('../lib/sources/movies-host');
+const seriesHost = require('../lib/sources/series-host');
 
 const MOVIES = ['therachaapa-2026', 'hoppers-2026'];
 const SERIES = ['perfect-crown-2026', 'the-boys-2019'];
@@ -17,6 +19,22 @@ function assertPlayers(label, players) {
 }
 
 (async () => {
+  for (const h of ['tv10.lk21official.cc', 'tv99.lk21official.cc', 'lk21.party', 'lk21official.love']) {
+    if (!movieHost.isKnownMovieHost(h)) throw new Error(`movie host was not recognized: ${h}`);
+  }
+  for (const h of ['tv4.nontondrama.my', 'drakor.example', 'playeriframe.sbs']) {
+    if (movieHost.isKnownMovieHost(h)) throw new Error(`non-movie host was recognized as movie: ${h}`);
+  }
+  console.log('movie host classification OK');
+
+  for (const h of ['tv4.nontondrama.my', 'tv99.nontondrama.my', 'nontondrama.my']) {
+    if (!seriesHost.isKnownSeriesHost(h)) throw new Error(`series host was not recognized: ${h}`);
+  }
+  for (const h of ['tv10.lk21official.cc', 'lk21.party', 'playeriframe.sbs']) {
+    if (seriesHost.isKnownSeriesHost(h)) throw new Error(`non-series host was recognized as series: ${h}`);
+  }
+  console.log('series host classification OK');
+
   for (const slug of MOVIES) {
     scraper.invalidateCache(`movie:${slug}`);
     const data = await scraper.getMovie(slug);
