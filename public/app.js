@@ -18,6 +18,24 @@ const SYNC_TOKEN_KEY     = 'spilstream_sync_token';   // auth — opaque 64-hex 
 const SYNC_CODE_KEY      = 'spilstream_sync_code';    // display only — may expire
 const SYNC_EXP_KEY       = 'spilstream_sync_code_expires_at';
 const RECENT_SEARCH_MAX  = 10;
+const DETAIL_VIEW_MODE  = window.SINEPIL_CONFIG?.detailViewMode === 'page' ? 'page' : 'modal';
+
+function isDetailPageMode() { return DETAIL_VIEW_MODE === 'page'; }
+function isDetailRoute() { return /^\/(movie|series)\//.test(location.pathname); }
+
+const DETAIL_PAGE_ID_MAP = {
+  'modal-overlay': 'detail-page',
+  modal: 'page-modal',
+};
+
+function detailEl(id) {
+  if (!isDetailPageMode()) return document.getElementById(id);
+  return document.getElementById(DETAIL_PAGE_ID_MAP[id] || 'page-' + id) || document.getElementById(id);
+}
+
+function detailCloseEl() {
+  return isDetailPageMode() ? null : document.querySelector('#modal .modal-close');
+}
 
 // Hook called after any History/Wishlist mutation. Wired up by Sync below;
 // guarded with try/catch so calls before Sync init don't throw (TDZ).
@@ -302,6 +320,10 @@ let currentEpisode = null;      // { season, episode } when a series episode is 
 /* ---- Tab switching ---- */
 let activeTab = 'browse';
 function showTab(name) {
+  if (detailEl('modal-overlay')?.classList.contains('open')) {
+    hideDetailView();
+    if (isDetailRoute()) history.pushState({}, '', '/');
+  }
   activeTab = name;
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
@@ -550,6 +572,7 @@ const SKELETON_CARD = `
 const RECS_MIN_HISTORY   = 3;
 const RECS_MAX_ITEMS     = 20;
 const RECS_TOP_N_GENRES  = 3;
+const DETAIL_RECS_MAX_ITEMS = 18;
 
 function parseGenres(s) {
   return (s || '').split(',').map(g => g.trim().toLowerCase()).filter(Boolean);
@@ -564,6 +587,80 @@ function topGenresFromHistory(kind) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, RECS_TOP_N_GENRES)
     .map(([g]) => g);
+}
+
+// Detail page recommendations: rank rail items by overlap with the current title.
+function buildDetailRecommendations(rails, current, kind) {
+  const currentSlug = current?.slug;
+  const currentGenres = parseGenres(current?.genre);
+  const bySlug = new Map();
+  let order = 0;
+
+  for (const rail of rails || []) {
+    for (const raw of rail.items || []) {
+      if (!raw?.slug || raw.slug === currentSlug || bySlug.has(raw.slug)) continue;
+      const item = { ...raw, kind };
+      const genres = parseGenres(item.genre);
+      const genreScore = currentGenres.length
+        ? genres.filter(g => currentGenres.includes(g)).length
+        : 0;
+      const yearScore = current?.year && item.year && String(item.year) === String(current.year) ? 0.25 : 0;
+      bySlug.set(item.slug, { item, score: genreScore + yearScore, order: order++ });
+    }
+  }
+
+  const ranked = [...bySlug.values()]
+    .sort((a, b) => (b.score - a.score) || (a.order - b.order))
+    .slice(0, DETAIL_RECS_MAX_ITEMS)
+    .map(r => r.item);
+
+  return ranked;
+}
+
+function detailRecommendationsSkeletonHTML() {
+  return `
+    <div class="section-header">
+      <span class="section-title">You May Also Like</span>
+    </div>
+    <div class="rail-scroll">${Array(8).fill(SKELETON_CARD).join('')}</div>`;
+}
+
+async function loadDetailRecommendations(current, kind) {
+  if (!isDetailPageMode()) return;
+  const el = document.getElementById('page-detail-recommendations');
+  if (!el) return;
+
+  el.style.display = '';
+  el.innerHTML = detailRecommendationsSkeletonHTML();
+
+  try {
+    const res = await fetch(`/api/home?kind=${encodeURIComponent(kind)}`);
+    const rails = await res.json();
+    if (!Array.isArray(rails)) throw new Error(rails?.error || 'Invalid recommendation payload');
+
+    const items = buildDetailRecommendations(rails, current, kind);
+    if (items.length === 0) {
+      el.style.display = 'none';
+      el.innerHTML = '';
+      return;
+    }
+
+    el.innerHTML = `
+      <div class="section-header">
+        <span class="section-title">You May Also Like</span>
+      </div>
+      <div class="rail-wrap">
+        <button class="rail-arrow rail-arrow-left" aria-label="Scroll left" data-action="railScroll" data-dir="-1">&lsaquo;</button>
+        <div class="rail-scroll">${items.map(m => cardHTML(m)).join('')}</div>
+        <button class="rail-arrow rail-arrow-right" aria-label="Scroll right" data-action="railScroll" data-dir="1">&rsaquo;</button>
+      </div>
+    `;
+    el.querySelectorAll('.rail-scroll').forEach(attachCardEvents);
+    el.querySelectorAll('.rail-wrap').forEach(updateRailArrows);
+  } catch (e) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+  }
 }
 
 // Given all items that appear anywhere in the rails, score each by how many
@@ -935,31 +1032,36 @@ function resetModalChrome() {
   currentPlayers = [];
   descExpanded   = false;
 
-  document.getElementById('modal-overlay').classList.add('open');
-  document.body.classList.add('modal-open');
+  detailEl('modal-overlay').classList.add('open');
+  document.body.classList.toggle('modal-open', !isDetailPageMode());
+  document.body.classList.toggle('detail-page-open', isDetailPageMode());
   resetPlayer('Loading…');
-  document.getElementById('player-tabs').innerHTML = '';
-  const picker = document.getElementById('episode-picker');
+  detailEl('player-tabs').innerHTML = '';
+  const picker = detailEl('episode-picker');
   if (picker) picker.style.display = 'none';
 
   // Show skeleton shimmer in the info pane while scraper fetches upstream.
   // Title/meta/desc/cast get replaced wholesale by renderModal on success,
   // so we don't need to manage a separate teardown.
-  document.getElementById('modal-title').innerHTML = '<span class="skeleton-line skeleton-line--title"></span>';
-  document.getElementById('modal-meta').innerHTML  = `
+  detailEl('modal-title').innerHTML = '<span class="skeleton-line skeleton-line--title"></span>';
+  detailEl('modal-meta').innerHTML  = `
     <span class="pill skeleton-pill"></span>
     <span class="pill skeleton-pill"></span>
     <span class="pill skeleton-pill"></span>`;
-  document.getElementById('modal-desc').innerHTML  = `
+  detailEl('modal-desc').innerHTML  = `
     <span class="skeleton-line"></span>
     <span class="skeleton-line"></span>
     <span class="skeleton-line skeleton-line--short"></span>`;
-  document.getElementById('modal-cast').innerHTML  = '';
+  detailEl('modal-cast').innerHTML  = '';
 
-  const _mp = document.getElementById('modal-poster');
+  const _mp = detailEl('modal-poster');
   _mp.classList.remove('loaded');
   _mp.removeAttribute('src');
-  document.getElementById('read-more-btn').style.display = 'none';
+  detailEl('read-more-btn').style.display = 'none';
+  if (isDetailPageMode()) {
+    const recs = document.getElementById('page-detail-recommendations');
+    if (recs) { recs.innerHTML = ''; recs.style.display = 'none'; }
+  }
 }
 
 /* ---- Open series modal ---- */
@@ -984,6 +1086,7 @@ async function openSeries(slug, { pushHistory = true, autoEpisode } = {}) {
     currentMovie  = { ...data, kind: 'series' };
 
     renderModal({ ...data, duration: '' });
+    loadDetailRecommendations(data, 'series');
 
     // Save to history (without episode until the user plays one)
     const existing = History.all().find(m => m.slug === data.slug);
@@ -1018,7 +1121,7 @@ async function openSeries(slug, { pushHistory = true, autoEpisode } = {}) {
       }
     }
     if (startSeason) {
-      document.getElementById('season-select').value = String(startSeason);
+      detailEl('season-select').value = String(startSeason);
       renderEpisodeList();
       if (startEpisode) {
         if (continuing) toast(`Continuing from S${startSeason} E${startEpisode}`, 3000);
@@ -1030,15 +1133,15 @@ async function openSeries(slug, { pushHistory = true, autoEpisode } = {}) {
       resetPlayer('No episodes available');
     }
   } catch (e) {
-    document.getElementById('modal-title').textContent = 'Error loading series';
+    detailEl('modal-title').textContent = 'Error loading series';
     resetPlayer('Error: ' + e.message);
   }
 }
 
 function renderSeasonSelect(data) {
-  const picker = document.getElementById('episode-picker');
+  const picker = detailEl('episode-picker');
   picker.style.display = 'block';
-  const sel = document.getElementById('season-select');
+  const sel = detailEl('season-select');
   sel.innerHTML = data.seasons.map(s =>
     `<option value="${s.season}">Season ${s.season} (${s.episodes.length} eps)</option>`
   ).join('');
@@ -1046,9 +1149,9 @@ function renderSeasonSelect(data) {
 
 function renderEpisodeList() {
   if (!currentSeries) return;
-  const season = parseInt(document.getElementById('season-select').value, 10);
+  const season = parseInt(detailEl('season-select').value, 10);
   const s = currentSeries.seasons.find(x => x.season === season);
-  const list = document.getElementById('episode-list');
+  const list = detailEl('episode-list');
   if (!s) { list.innerHTML = ''; return; }
   list.innerHTML = s.episodes.map(e => {
     const active = currentEpisode?.season === s.season && currentEpisode?.episode === e.episode ? ' active' : '';
@@ -1061,10 +1164,10 @@ function renderEpisodeList() {
 
 async function loadEpisode(season, episode) {
   if (!currentSeries) return;
-  const status = document.getElementById('episode-status');
+  const status = detailEl('episode-status');
   status.textContent = `Loading S${season} E${episode}…`;
   resetPlayer('Loading…');
-  document.getElementById('player-tabs').innerHTML = '';
+  detailEl('player-tabs').innerHTML = '';
 
   try {
     const res  = await fetch(`/api/episode/${encodeURIComponent(currentSeries.slug)}/${season}/${episode}`);
@@ -1121,7 +1224,7 @@ function findNextEpisode() {
 }
 
 function renderNextEpisodeBtn() {
-  const btn = document.getElementById('next-episode-btn');
+  const btn = detailEl('next-episode-btn');
   if (!btn) return;
   const next = findNextEpisode();
   if (!next) { btn.style.display = 'none'; return; }
@@ -1158,7 +1261,7 @@ function sortPlayers(players) {
 }
 
 function renderPlayerTabs() {
-  const tabsEl = document.getElementById('player-tabs');
+  const tabsEl = detailEl('player-tabs');
   if (currentPlayers.length === 0) {
     tabsEl.innerHTML = '<span style="color:var(--muted);font-size:12px">No player sources found.</span>';
   } else {
@@ -1193,6 +1296,7 @@ async function openMovie(slug, { pushHistory = true } = {}) {
     renderModal(data);
     renderPlayerTabs();
     if (currentPlayers.length > 0) loadPlayer(0);
+    loadDetailRecommendations(data, 'movie');
 
     History.upsert({
       slug: data.slug, title: data.title, poster: data.poster,
@@ -1200,13 +1304,13 @@ async function openMovie(slug, { pushHistory = true } = {}) {
       kind: 'movie',
     });
   } catch (e) {
-    document.getElementById('modal-title').textContent = 'Error loading movie';
+    detailEl('modal-title').textContent = 'Error loading movie';
     resetPlayer('Error: ' + e.message);
   }
 }
 
 function renderModal(data) {
-  const posterEl = document.getElementById('modal-poster');
+  const posterEl = detailEl('modal-poster');
   // Wire handlers BEFORE setting src so we never miss a synchronous fire.
   posterEl.classList.remove('loaded');
   posterEl.onload  = () => posterEl.classList.add('loaded');
@@ -1226,7 +1330,7 @@ function renderModal(data) {
     posterEl.classList.add('loaded'); // no poster → just stop the shimmer
   }
 
-  document.getElementById('modal-title').textContent = data.title || 'Unknown';
+  detailEl('modal-title').textContent = data.title || 'Unknown';
 
   const meta = [];
   if (data.year)     meta.push(`<span class="pill">${esc(data.year)}</span>`);
@@ -1235,21 +1339,21 @@ function renderModal(data) {
   if (data.genre)    String(data.genre).split(',').slice(0, 3).forEach(g =>
     meta.push(`<span class="pill">${esc(g.trim())}</span>`)
   );
-  document.getElementById('modal-meta').innerHTML = meta.join('');
+  detailEl('modal-meta').innerHTML = meta.join('');
 
   const desc = data.description || '';
-  document.getElementById('modal-desc').textContent = desc;
-  document.getElementById('read-more-btn').style.display = desc.length > 180 ? 'inline' : 'none';
+  detailEl('modal-desc').textContent = desc;
+  detailEl('read-more-btn').style.display = desc.length > 180 ? 'inline' : 'none';
 
   const parts = [];
   if (data.director) parts.push(`<strong>Director:</strong> ${esc(data.director)}`);
   if (data.cast)     parts.push(`<strong>Cast:</strong> ${esc(data.cast)}`);
-  document.getElementById('modal-cast').innerHTML = parts.join('<br>');
+  detailEl('modal-cast').innerHTML = parts.join('<br>');
 
   // Show native Share button only on devices that support it (mobile)
-  document.getElementById('btn-share-native').style.display = navigator.share ? '' : 'none';
+  detailEl('btn-share-native').style.display = navigator.share ? '' : 'none';
 
-  const wBtn = document.getElementById('btn-wishlist');
+  const wBtn = detailEl('btn-wishlist');
   const inWL = Wishlist.has(data.slug);
   wBtn.classList.toggle('added', inWL);
   wBtn.innerHTML = inWL ? '&#9829; In Wishlist' : '&#9825; Wishlist';
@@ -1261,10 +1365,11 @@ let playerLoadTimer = null;
 function loadPlayer(index) {
   const p = currentPlayers[index];
   if (!p) return;
+  const idPrefix = isDetailPageMode() ? 'page-' : '';
 
-  document.querySelectorAll('.ptab').forEach((t, i) => t.classList.toggle('active', i === index));
+  detailEl('player-tabs').querySelectorAll('.ptab').forEach((t, i) => t.classList.toggle('active', i === index));
 
-  const wrap = document.getElementById('player-wrap');
+  const wrap = detailEl('player-wrap');
 
   // finalUrl is already resolved by the server at scrape time — no extra round-trip
   const playerUrl = p.finalUrl || p.src;
@@ -1280,7 +1385,7 @@ function loadPlayer(index) {
   // without leaving the player.
   const nextEp = (currentKind === 'series') ? findNextEpisode() : null;
   const nextEpBtnHTML = nextEp
-    ? `<button class="player-next-ep-btn" id="player-next-ep-btn"
+    ? `<button class="player-next-ep-btn" id="${idPrefix}player-next-ep-btn"
                data-action="loadNextEpisode" title="Next episode" style="display:flex">
          Next &rarr; EP ${nextEp.episode}${nextEp.season !== currentEpisode.season ? ` (S${nextEp.season})` : ''}
        </button>`
@@ -1291,7 +1396,7 @@ function loadPlayer(index) {
   // on a blocked/broken player need an in-overlay way to cycle sources.
   const nextSrcIdx = currentPlayers.length > 1 ? (index + 1) % currentPlayers.length : -1;
   const nextSrcBtnHTML = nextSrcIdx >= 0
-    ? `<button class="player-next-src-btn" id="player-next-src-btn"
+    ? `<button class="player-next-src-btn" id="${idPrefix}player-next-src-btn"
                data-action="loadPlayer" data-index="${nextSrcIdx}"
                title="Try next player" style="display:flex">
          Try ${esc(currentPlayers[nextSrcIdx].label || `Player ${nextSrcIdx + 1}`)}
@@ -1309,14 +1414,14 @@ function loadPlayer(index) {
     : '';
 
   wrap.innerHTML = `<iframe
-    id="player-iframe"
+    id="${idPrefix}player-iframe"
     src="${esc(playerUrl)}"
     allowfullscreen
     allow="autoplay; encrypted-media; fullscreen; picture-in-picture; clipboard-write"
     referrerpolicy="no-referrer"
     ${sandboxAttr}
   ></iframe>
-  <button class="player-fullscreen-btn" id="player-fullscreen-btn"
+  <button class="player-fullscreen-btn" id="${idPrefix}player-fullscreen-btn"
           data-action="fullscreenPlayer" title="Fullscreen" style="display:flex">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
       <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
@@ -1330,7 +1435,7 @@ function loadPlayer(index) {
   // within the timeout window, surface the "try next player" fallback.
   // (Can't detect broken embed contents cross-origin — only total failure.)
   if (playerLoadTimer) clearTimeout(playerLoadTimer);
-  const iframe = document.getElementById('player-iframe');
+  const iframe = detailEl('player-iframe');
   let loaded = false;
   iframe?.addEventListener('load', () => {
     loaded = true;
@@ -1343,7 +1448,7 @@ function loadPlayer(index) {
   }, 15000);
 
   // Once the iframe is in place, fade the modal-close like a video control overlay.
-  document.querySelector('.modal-close')?.classList.add('auto-hide');
+  detailCloseEl()?.classList.add('auto-hide');
   showFsBtn(); // show briefly when player loads, then auto-hides after 3s
 }
 
@@ -1380,25 +1485,30 @@ function toggleWishlist() {
     kind: currentKind,
   };
   const added = Wishlist.toggle(entry);
-  const wBtn  = document.getElementById('btn-wishlist');
+  const wBtn  = detailEl('btn-wishlist');
   wBtn.classList.toggle('added', added);
   wBtn.innerHTML = added ? '&#9829; In Wishlist' : '&#9825; Wishlist';
   toast(added ? 'Added to wishlist' : 'Removed from wishlist');
 }
 
-/* ---- Modal close ---- */
-function closeModal(e) {
-  if (e && e.target !== document.getElementById('modal-overlay')) return;
-  document.getElementById('modal-overlay').classList.remove('open');
-  document.body.classList.remove('modal-open');
-  document.querySelector('.modal-close')?.classList.remove('auto-hide', 'visible');
+function hideDetailView() {
+  detailEl('modal-overlay').classList.remove('open');
+  document.body.classList.remove('modal-open', 'detail-page-open');
+  detailCloseEl()?.classList.remove('auto-hide', 'visible');
   resetPlayer();
   currentMovie   = null;
   currentSeries  = null;
   currentEpisode = null;
   currentPlayers = [];
+}
+
+/* ---- Modal close ---- */
+function closeModal(e, { force = false } = {}) {
+  if (isDetailPageMode() && !force) return;
+  if (e && e.target !== detailEl('modal-overlay')) return;
+  hideDetailView();
   // Restore URL to home (only if we're currently on a /movie/ or /series/ path)
-  if (/^\/(movie|series)\//.test(location.pathname)) {
+  if (isDetailRoute()) {
     history.pushState({}, '', '/');
   }
 }
@@ -1407,7 +1517,7 @@ function closeModal(e) {
 function copyMovieLink() {
   if (!currentMovie) return;
   const url = location.origin + currentItemPath();
-  const btn = document.getElementById('btn-copy-link');
+  const btn = detailEl('btn-copy-link');
   navigator.clipboard.writeText(url).then(() => {
     const prev = btn.innerHTML;
     btn.innerHTML = `<svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -1430,14 +1540,15 @@ function nativeShare() {
 
 function resetPlayer(msg) {
   if (playerLoadTimer) { clearTimeout(playerLoadTimer); playerLoadTimer = null; }
-  document.getElementById('player-wrap').innerHTML = `
-    <div class="player-placeholder" id="player-placeholder">
+  const idPrefix = isDetailPageMode() ? 'page-' : '';
+  detailEl('player-wrap').innerHTML = `
+    <div class="player-placeholder" id="${idPrefix}player-placeholder">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48">
         <circle cx="12" cy="12" r="10"/><polygon points="10,8 16,12 10,16"/>
       </svg>
       <span>${msg || 'Select a player below to start watching'}</span>
     </div>
-    <button class="player-fullscreen-btn" id="player-fullscreen-btn"
+    <button class="player-fullscreen-btn" id="${idPrefix}player-fullscreen-btn"
             data-action="fullscreenPlayer" title="Fullscreen">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
@@ -1450,27 +1561,28 @@ function resetPlayer(msg) {
 let _fsIdleTimer = null;
 
 function showFsBtn() {
-  const btn   = document.getElementById('player-fullscreen-btn');
-  const close = document.querySelector('.modal-close');
-  const next  = document.getElementById('player-next-ep-btn');
-  const src   = document.getElementById('player-next-src-btn');
+  const btn   = detailEl('player-fullscreen-btn');
+  const close = detailCloseEl();
+  const next  = detailEl('player-next-ep-btn');
+  const src   = detailEl('player-next-src-btn');
   if (btn && btn.style.display === 'flex') btn.classList.add('visible');
   if (close && close.classList.contains('auto-hide')) close.classList.add('visible');
   if (next && next.style.display === 'flex') next.classList.add('visible');
   if (src && src.style.display === 'flex') src.classList.add('visible');
   clearTimeout(_fsIdleTimer);
   _fsIdleTimer = setTimeout(() => {
-    document.getElementById('player-fullscreen-btn')?.classList.remove('visible');
-    document.querySelector('.modal-close')?.classList.remove('visible');
-    document.getElementById('player-next-ep-btn')?.classList.remove('visible');
-    document.getElementById('player-next-src-btn')?.classList.remove('visible');
+    detailEl('player-fullscreen-btn')?.classList.remove('visible');
+    detailCloseEl()?.classList.remove('visible');
+    detailEl('player-next-ep-btn')?.classList.remove('visible');
+    detailEl('player-next-src-btn')?.classList.remove('visible');
   }, 3000);
 }
 
 // Show on any user activity inside the modal (mousemove for desktop, touchstart for mobile)
-const _modal = document.getElementById('modal');
-_modal?.addEventListener('mousemove', showFsBtn);
-_modal?.addEventListener('touchstart', showFsBtn, { passive: true });
+for (const root of [document.getElementById('modal'), document.getElementById('page-modal')]) {
+  root?.addEventListener('mousemove', showFsBtn);
+  root?.addEventListener('touchstart', showFsBtn, { passive: true });
+}
 // Show on any keypress (useful in fullscreen where mouse events are inside iframe)
 document.addEventListener('keydown', showFsBtn);
 // Cross-origin iframes swallow mousemove/touchstart, so the listeners above
@@ -1481,6 +1593,7 @@ document.addEventListener('keydown', showFsBtn);
 //   - `window blur` fires when the iframe steals focus on click/tap. Filter to
 //     iframe focus only so alt-tabbing to another window doesn't trigger it.
 document.getElementById('player-wrap')?.addEventListener('mouseenter', showFsBtn);
+document.getElementById('page-player-wrap')?.addEventListener('mouseenter', showFsBtn);
 window.addEventListener('blur', () => {
   if (document.activeElement?.tagName === 'IFRAME') showFsBtn();
 });
@@ -1491,14 +1604,14 @@ function fullscreenPlayer() {
     document.exitFullscreen();
     return;
   }
-  const wrap = document.getElementById('player-wrap');
+  const wrap = detailEl('player-wrap');
   if (!wrap || !wrap.querySelector('iframe')) return;
   (wrap.requestFullscreen || wrap.webkitRequestFullscreen || wrap.mozRequestFullScreen)?.call(wrap);
 }
 
 // Sync button icon with fullscreen state and show button briefly on transition
 function _onFullscreenChange() {
-  const btn = document.getElementById('player-fullscreen-btn');
+  const btn = detailEl('player-fullscreen-btn');
   if (!btn) return;
   const isFs = !!document.fullscreenElement;
   btn.title = isFs ? 'Exit fullscreen' : 'Fullscreen';
@@ -1513,8 +1626,8 @@ document.addEventListener('webkitfullscreenchange', _onFullscreenChange);
 /* ---- Toggle description ---- */
 function toggleDesc() {
   descExpanded = !descExpanded;
-  document.getElementById('modal-desc').classList.toggle('expanded', descExpanded);
-  document.getElementById('read-more-btn').textContent = descExpanded ? 'Show less' : 'Read more';
+  detailEl('modal-desc').classList.toggle('expanded', descExpanded);
+  detailEl('read-more-btn').textContent = descExpanded ? 'Show less' : 'Read more';
 }
 
 /* ---- Toast ---- */
@@ -1546,7 +1659,7 @@ function formatDuration(iso) {
 
 /* ---- Keyboard ---- */
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closeModal();
+  if (e.key === 'Escape' && !isDetailPageMode()) closeModal();
   if (e.key === '/' && !['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) {
     e.preventDefault();
     document.getElementById('search-input').focus();
@@ -1558,14 +1671,8 @@ window.addEventListener('popstate', (e) => {
   if (e.state?.slug) {
     openItem(e.state.slug, e.state.kind || 'movie');
   } else {
-    if (document.getElementById('modal-overlay').classList.contains('open')) {
-      document.getElementById('modal-overlay').classList.remove('open');
-      document.body.classList.remove('modal-open');
-      resetPlayer();
-      currentMovie   = null;
-      currentSeries  = null;
-      currentEpisode = null;
-      currentPlayers = [];
+    if (detailEl('modal-overlay').classList.contains('open')) {
+      hideDetailView();
     }
   }
 });

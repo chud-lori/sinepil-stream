@@ -657,6 +657,81 @@ nav {
    show its scrollbar (two side-by-side scrollbars). */
 body.modal-open { overflow: hidden; }
 
+.detail-page {
+  display: none;
+  padding: 22px 24px 52px;
+}
+.detail-page.open { display: block; }
+.detail-page-shell {
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 24px;
+  align-items: start;
+}
+.detail-player-column { min-width: 0; }
+.detail-page .player-wrap {
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.detail-page .player-tabs,
+.detail-page .episode-picker,
+.detail-page .popup-notice,
+.detail-page .player-hint {
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+.detail-page .player-hint { border-bottom: 1px solid var(--border); }
+.detail-sidebar {
+  position: sticky;
+  top: 82px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.detail-poster {
+  width: 100%;
+  min-width: 0;
+  max-width: 260px;
+  border-radius: 6px;
+}
+.detail-details { min-width: 0; }
+.detail-title {
+  font-size: 28px;
+  line-height: 1.15;
+  margin: 0 0 10px;
+}
+.detail-actions {
+  padding: 0;
+  border-top: 0;
+  justify-content: flex-start;
+}
+.detail-recommendations {
+  max-width: 1180px;
+  margin: 30px auto 0;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.detail-recommendations .section-header {
+  padding-left: 0;
+  padding-right: 0;
+}
+.detail-recommendations .rail-scroll {
+  padding-left: 0;
+  padding-right: 0;
+}
+.detail-recommendations .rail-arrow-left { left: 0; }
+.detail-recommendations .rail-arrow-right { right: 0; }
+
+body.detail-page-open { overflow: auto; }
+body.detail-page-open main,
+body.detail-page-open #browse-bar,
+body.detail-page-open #series-filter-bar,
+body.detail-page-open #url-bar { display: none !important; }
+
 .modal {
   background: var(--surface);
   border-radius: 12px;
@@ -1201,6 +1276,16 @@ body.modal-open { overflow: hidden; }
   #url-bar { padding: 8px 14px; }
   #url-bar .url-bar-label { display: none; }
   .card-actions { opacity: 1; pointer-events: auto; }
+
+  .detail-page { padding: 0 0 28px; }
+  .detail-page-shell { display: block; }
+  .detail-page .player-wrap { border-radius: 0; border-left: 0; border-right: 0; }
+  .detail-sidebar { position: static; padding: 14px; }
+  .detail-poster { display: none; }
+  .detail-title { font-size: 20px; }
+  .detail-actions { padding-bottom: 0; }
+  .detail-recommendations { margin-top: 10px; padding: 12px 14px 0; }
+  .detail-recommendations .rail-scroll { padding-left: 0; padding-right: 0; }
 
   /* Modal — full-screen on mobile */
   .modal-overlay { padding: 0; align-items: flex-start; }

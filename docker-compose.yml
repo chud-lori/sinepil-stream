@@ -9,6 +9,7 @@ services:
       - NODE_ENV=production
       - PORT=3500
       - MAINTENANCE_MODE=0   # flip to 1 to take playback offline during an upstream rotation
+      - DETAIL_VIEW_MODE=modal # modal or page; page renders /movie/:slug as an inline detail page
     # Cap container memory. Node ~80MB. 400M leaves plenty of headroom for
     # SQLite + concurrent scrapes. If we breach, Docker OOMs the container
     # and `restart` brings it back.

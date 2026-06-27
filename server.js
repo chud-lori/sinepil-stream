@@ -65,6 +65,13 @@ const apiLimiter = rateLimit({
   message: { error: 'Too many requests — slow down' },
 });
 app.use('/api/', apiLimiter);
+
+const DETAIL_VIEW_MODE = process.env.DETAIL_VIEW_MODE === 'page' ? 'page' : 'modal';
+app.get('/app-config.js', (req, res) => {
+  res.type('application/javascript');
+  res.set('Cache-Control', 'no-cache');
+  res.send(`window.SINEPIL_CONFIG=${JSON.stringify({ detailViewMode: DETAIL_VIEW_MODE })};`);
+});
 // Force browsers to revalidate static assets (CSS/JS/HTML) on every request.
 // Without this, Chrome's heuristic cache silently serves stale files for hours
 // after a deploy — UI changes appear "broken" until the user hard-refreshes.
@@ -470,14 +477,30 @@ const server = app.listen(PORT, () => {
 
 // Graceful shutdown — finish in-flight requests before exiting.
 // Triggered by PM2 reload (SIGINT) or docker stop (SIGTERM).
+let shuttingDown = false;
+let forceExitTimer = null;
+
 function shutdown(signal) {
+  if (shuttingDown) {
+    console.warn(`[${signal}] Shutdown already in progress; press Ctrl-C again after timeout or wait for exit.`);
+    return;
+  }
+
+  shuttingDown = true;
   console.log(`[${signal}] Shutting down gracefully…`);
+
   server.close(() => {
+    if (forceExitTimer) clearTimeout(forceExitTimer);
     console.log('All connections closed. Exiting.');
     process.exit(0);
   });
-  // Force-exit after 15 s if connections are stuck
-  setTimeout(() => { console.warn('Force exit after timeout'); process.exit(1); }, 15000).unref();
+
+  // Force-exit after 15 s if connections are stuck.
+  forceExitTimer = setTimeout(() => {
+    console.warn('Force exit after timeout');
+    process.exit(1);
+  }, 15000);
+  forceExitTimer.unref();
 }
 process.on('SIGINT',  () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
