@@ -5,6 +5,18 @@
    player object (direct embed, or /api/proxy when CSP blocks direct framing).
    ===================================================================== */
 
+/* ---- Poster URLs ----
+   Posters live on third-party CDNs that some client networks block at the DNS
+   level, so cards rendered fine but images stayed blank on those networks.
+   Route every poster through our own origin instead — /api/img re-serves it.
+   Applied at render time, so localStorage entries holding raw CDN URLs from
+   earlier versions get fixed too. */
+const posterSrc = (u) => {
+  if (!u) return '';
+  if (u.startsWith('/')) return u;              // already ours
+  return '/api/img?url=' + encodeURIComponent(u);
+};
+
 /* ---- localStorage helpers ---- */
 const LS = {
   get: (k) => { try { return JSON.parse(localStorage.getItem(k) || '[]'); } catch { return []; } },
@@ -902,7 +914,7 @@ function cardHTML(m, opts = {}) {
   // not under the card title block.
   const poster = m.poster
     ? `<div class="card-img-wrap">
-         <img class="card-img" src="${esc(m.poster)}" alt="${esc(m.title)}" loading="lazy">
+         <img class="card-img" src="${esc(posterSrc(m.poster))}" alt="${esc(m.title)}" loading="lazy">
          ${watchedBadge}
        </div>`
     : '';
@@ -1315,7 +1327,7 @@ function renderModal(data) {
   posterEl.classList.remove('loaded');
   posterEl.onload  = () => posterEl.classList.add('loaded');
   posterEl.onerror = () => posterEl.classList.add('loaded'); // hide shimmer even on error
-  const url = data.poster || '';
+  const url = posterSrc(data.poster || '');
   if (url) {
     posterEl.src = url;
     // Edge case: setting src to a value that's already loaded (cached or

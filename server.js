@@ -5,7 +5,7 @@ const cheerio   = require('cheerio');
 const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
 const scraper   = require('./scraper');
-const { assertSafeOutboundUrl } = require('./lib/security');
+const { assertSafeOutboundUrl, assertSafePosterUrl } = require('./lib/security');
 const sync      = require('./lib/sync');
 
 const app = express();
@@ -64,7 +64,18 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many requests — slow down' },
 });
-app.use('/api/', apiLimiter);
+// Poster proxy gets its own, much higher bucket: one home view is 8 rails x 20
+// cards, so ~160 image requests would blow the 120/min API budget instantly.
+const imgLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 1200,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many requests — slow down' },
+});
+app.use('/api/', (req, res, next) => (
+  req.path.startsWith('/img') ? imgLimiter(req, res, next) : apiLimiter(req, res, next)
+));
 
 const DETAIL_VIEW_MODE = process.env.DETAIL_VIEW_MODE === 'page' ? 'page' : 'modal';
 app.get('/app-config.js', (req, res) => {
@@ -308,10 +319,10 @@ app.get('/api/home', async (req, res) => {
 const MAX_REDIRECT_HOPS  = 5;
 const PROXY_MAX_BODY     = 10 * 1024 * 1024; // 10 MB — caps memory per request
 
-async function safeProxyFetch(initialUrl, axiosOpts) {
+async function safeProxyFetch(initialUrl, axiosOpts, guard = assertSafeOutboundUrl) {
   let currentUrl = initialUrl;
   for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
-    await assertSafeOutboundUrl(currentUrl);
+    await guard(currentUrl);
     const response = await axios.get(currentUrl, {
       ...axiosOpts,
       maxRedirects:    0,                          // we drive the redirect loop
@@ -324,6 +335,51 @@ async function safeProxyFetch(initialUrl, axiosOpts) {
   }
   const e = new Error('Too many redirects'); e.status = 502; throw e;
 }
+
+/* ======================================================
+   Poster proxy — GET /api/img?url=<poster url>
+   Our server can reach the poster CDNs; some client
+   networks can't (ISP-level domain blocks), so cards
+   render blank there. Re-serving posters from our own
+   origin makes them load anywhere the app itself loads.
+   ====================================================== */
+const POSTER_MAX_BODY = 5 * 1024 * 1024; // 5 MB — a poster is ~100 KB
+
+app.get('/api/img', async (req, res) => {
+  const url = req.query.url || '';
+  if (!url) return res.status(400).json({ error: 'Missing url' });
+
+  let response;
+  try {
+    response = await safeProxyFetch(url, {
+      headers: {
+        'User-Agent': BROWSER_UA,
+        Referer: SOURCE_ORIGIN + '/',
+        Accept:  'image/avif,image/webp,image/jpeg,image/png,*/*;q=0.8',
+      },
+      responseType:     'arraybuffer',
+      timeout:          15000,
+      maxContentLength: POSTER_MAX_BODY,
+      maxBodyLength:    POSTER_MAX_BODY,
+    }, assertSafePosterUrl);
+  } catch (e) {
+    return res.status(e.status || 502).json({ error: e.message || 'Poster fetch failed' });
+  }
+
+  const ct = response.headers['content-type'] || '';
+  if (!ct.startsWith('image/')) {
+    // Upstream served an error page / interstitial instead of an image —
+    // don't cache that, and let the client fall back to its placeholder.
+    return res.status(502).json({ error: 'Upstream did not return an image' });
+  }
+
+  res.set('Content-Type', ct);
+  // Posters are content-addressed by filename upstream and never change, so a
+  // long immutable cache is safe and keeps repeat views off the origin.
+  res.set('Cache-Control', 'public, max-age=604800, immutable');
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.send(Buffer.from(response.data));
+});
 
 app.get('/api/proxy', async (req, res) => {
   const url = req.query.url || '';
