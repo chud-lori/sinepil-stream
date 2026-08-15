@@ -1104,6 +1104,26 @@ body.detail-page-open #url-bar { display: none !important; }
   visibility: visible;
 }
 
+/* Detail poster fallback — same 🎬 tile the cards use. Without it a poster
+   that 404s (or a title scraped with no poster at all) left an empty grey
+   box, while the identical failure on a card showed the placeholder. */
+.modal-poster-placeholder {
+  display: none;
+  width: 100%;
+  aspect-ratio: 2/3;
+  background: var(--surface);
+  align-items: center;
+  justify-content: center;
+  font-size: 40px;
+  color: var(--border);
+}
+.modal-poster.poster-error {
+  background: var(--card);
+  animation: none;
+}
+.modal-poster.poster-error img { display: none; }
+.modal-poster.poster-error .modal-poster-placeholder { display: flex; }
+
 .modal-details { flex: 1; min-width: 0; }
 
 .modal-title {

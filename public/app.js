@@ -1069,6 +1069,8 @@ function resetModalChrome() {
   const _mp = detailEl('modal-poster');
   _mp.classList.remove('loaded');
   _mp.removeAttribute('src');
+  // Drop the previous item's placeholder so the skeleton shimmers instead.
+  _mp.closest('.modal-poster')?.classList.remove('poster-error');
   detailEl('read-more-btn').style.display = 'none';
   if (isDetailPageMode()) {
     const recs = document.getElementById('page-detail-recommendations');
@@ -1323,10 +1325,17 @@ async function openMovie(slug, { pushHistory = true } = {}) {
 
 function renderModal(data) {
   const posterEl = detailEl('modal-poster');
+  const posterWrap = posterEl.closest('.modal-poster');
   // Wire handlers BEFORE setting src so we never miss a synchronous fire.
   posterEl.classList.remove('loaded');
+  posterWrap?.classList.remove('poster-error');
   posterEl.onload  = () => posterEl.classList.add('loaded');
-  posterEl.onerror = () => posterEl.classList.add('loaded'); // hide shimmer even on error
+  // Broken/missing poster → swap in the 🎬 placeholder, same as a card does.
+  // `loaded` still goes on so the container stops shimmering.
+  posterEl.onerror = () => {
+    posterEl.classList.add('loaded');
+    posterWrap?.classList.add('poster-error');
+  };
   const url = posterSrc(data.poster || '');
   if (url) {
     posterEl.src = url;
@@ -1336,10 +1345,15 @@ function renderModal(data) {
     // visible instead of staying at opacity:0 forever.
     if (posterEl.complete && posterEl.naturalWidth > 0) {
       posterEl.classList.add('loaded');
+    } else if (posterEl.complete) {
+      // Already-failed image (cached error) fires no 'error' event either.
+      posterEl.classList.add('loaded');
+      posterWrap?.classList.add('poster-error');
     }
   } else {
     posterEl.removeAttribute('src');
-    posterEl.classList.add('loaded'); // no poster → just stop the shimmer
+    posterEl.classList.add('loaded'); // stop the shimmer
+    posterWrap?.classList.add('poster-error'); // nothing to show → placeholder
   }
 
   detailEl('modal-title').textContent = data.title || 'Unknown';
